@@ -241,17 +241,21 @@ def esm_call(llr, del_thr=-3.0, tol_thr=-0.5):
     if llr is None: return ""
     return "deleterious" if llr <= del_thr else ("tolerated" if llr >= tol_thr else "ambiguous")
 
-def protein_context(rsid, chrom, pos, ref, alt):
-    """Get protein sequence + AA position for a missense variant via Ensembl VEP + sequence."""
-    ident = rsid if rsid else f"{chrom}:{pos}-{pos+len(ref)-1}/{alt}"
-    route = "id" if rsid else "region"
-    url = f"{ENSEMBL}/vep/human/{route}/{ident}" if rsid else f"{ENSEMBL}/vep/human/region/{chrom}:{pos}-{pos+len(ref)-1}/{alt}"
+def protein_context(rsid, chrom, pos, ref, alt, gene=None):
+    """Get protein sequence + AA position for a missense variant via Ensembl VEP + sequence.
+    Always queries by REGION+ALLELE (not rsID): an rsID can carry several alt alleles, and the
+    VEP-by-id route may return the amino-acid change for a DIFFERENT allele than the one in the
+    VCF. Region+allele guarantees the scored mutant residue matches the patient's actual alt."""
+    url = f"{ENSEMBL}/vep/human/region/{chrom}:{pos}-{pos+len(ref)-1}/{alt}"
     j = _get(url, params={"content-type":"application/json"})
     if not j: return None
     tcs = j[0].get("transcript_consequences") or []
     cand = [t for t in tcs if t.get("amino_acids") and "/" in t.get("amino_acids","") and t.get("protein_start")]
     if not cand: return None
-    t = sorted(cand, key=lambda x:(-int(x.get("canonical",0) or 0),))[0]
+    # prefer the transcript for the gene we annotated, then MANE/canonical if flagged, else first
+    same_gene = [t for t in cand if gene and t.get("gene_symbol")==gene]
+    pool = same_gene or cand
+    t = sorted(pool, key=lambda x:(-int(x.get("canonical",0) or 0),))[0]
     wt, mut = t["amino_acids"].split("/")
     pid = t.get("protein_id") or t["transcript_id"]
     s = _get(f"{ENSEMBL}/sequence/id/{pid}", params={"type":"protein","content-type":"application/json"})
@@ -380,7 +384,7 @@ def main():
         # ESM-2 missense scoring (optional)
         v["esm2_llr"]=None; v["esm2_call"]=""
         if a.esm and v["consequence"]=="missense_variant":
-            ctx=protein_context(v.get("rsid"), v["chrom"], v["pos"], v["ref"], v["alt"])
+            ctx=protein_context(v.get("rsid"), v["chrom"], v["pos"], v["ref"], v["alt"], v.get("gene"))
             if ctx:
                 v["esm2_llr"]=esm_score_missense(ctx["seq"], ctx["pos"], ctx["wt"], ctx["mut"])
                 v["esm2_call"]=esm_call(v["esm2_llr"])
