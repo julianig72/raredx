@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+env/
+out/
+*.log
+.DS_Store
+handoff/
