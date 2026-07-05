@@ -61,9 +61,12 @@ python raredx_pipeline.py input.vcf --esm --hpo "HP:0002205,HP:0001738" --out-pr
 
 Con un perfil de fibrosis quistica extraido de la nota clinica (10 terminos HPO), **CFTR
 sube del puesto #3-4 (solo variante) al #1**; BRCA1 -mayor score de variante pero sin
-relacion fenotipica- baja al #2. Ademas, ESM-2 baja el score de BRCA1 A566V (LLR +0.21,
-tolerada), refinando un VUS. El diseno multicapa evita falsos positivos: APOE R176C sale
-deleterea por ESM, pero la frecuencia (BA1) y el fenotipo la mantienen correctamente benigna.
+relacion fenotipica- baja al #2. El diseno multicapa evita falsos positivos: TP53 P72R y
+APOE R176C salen "deletereas" por ESM-2 (LLR -3.3 y -6.5), pero su alta frecuencia poblacional
+(regla BA1) y la ausencia de coincidencia fenotipica las mantienen correctamente como benignas
+-ESM-2 no atropella la evidencia clinica/poblacional. Los cambios de aminoacido se anotan por
+region+alelo del VCF para que el residuo mutante puntuado por ESM-2 coincida con el alelo real
+del paciente (p. ej. BRCA1 A566E, EGFR L858R, TP53 P72R).
 
 ## Uso completo
 
