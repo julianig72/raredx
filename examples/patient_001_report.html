@@ -1,5 +1,4 @@
-<!doctype html><html lang="es"><head><meta charset="utf-8">
-<title>Informe genómico con IA — PATIENT_001</title>
+<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Informe genómico con IA — PATIENT_001</title>
 <style>
 :root{--bg:#f5f6fa;--ink:#2c3e50;--mut:#7f8c8d}
 *{box-sizing:border-box} body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:var(--bg);color:var(--ink);line-height:1.45}
@@ -39,22 +38,22 @@ details{margin-top:8px;font-size:12.5px} summary{cursor:pointer;color:#2980b9} d
 footer{text-align:center;color:var(--mut);font-size:11px;margin:26px 0 10px}
 </style></head><body><div class="wrap">
 <header><h1>Informe genómico priorizado por fenotipo <span class="ai">IA</span></h1>
-<div class="sub">Muestra: <b>PATIENT_001</b> · GRCh38 · 10 variantes · ACMG-lite + ESM-2 (missense) × fenotipo HPO extraído por LLM · 2026-07-05 12:26</div></header>
-
-<div class="notebox">
-  <h3>① Nota clínica → HPO (extracción por LLM)</h3>
-  <div class="note">"Varón de 3 años remitido por su pediatra. Desde los primeros meses de vida presenta infecciones respiratorias de repetición (neumonías y bronquitis frecuentes), con tos crónica productiva. Deposiciones abundantes, grasas y malolientes compatibles con esteatorrea. No gana peso adecuadamente pese a apetito conservado; percentil ponderal por debajo del P3. Antecedente de íleo meconial al nacimiento que requirió cirugía. La madre refiere que el niño &quot;sabe salado&quot; al besarlo. Exploración: acropaquias incipientes, distensión abdominal."</div>
+<div class="sub">Muestra: <b>PATIENT_001</b> · GRCh38 · 10 variantes · ACMG-lite + ESM-2 (missense) × fenotipo HPO extraído por LLM · 2026-07-05 12:41</div></header>
+<div class="notebox"><h3>① Nota clínica → HPO (extracción por LLM)</h3>
+  <div class="note">"Varón de 3 años remitido por su pediatra. Desde los primeros meses de vida presenta
+infecciones respiratorias de repetición (neumonías y bronquitis frecuentes), con tos
+crónica productiva. Deposiciones abundantes, grasas y malolientes compatibles con
+esteatorrea. No gana peso adecuadamente pese a apetito conservado; percentil ponderal
+por debajo del P3. Antecedente de íleo meconial al nacimiento que requirió cirugía.
+La madre refiere que el niño &quot;sabe salado&quot; al besarlo. Exploración: acropaquias
+incipientes, distensión abdominal. Sin antecedentes familiares conocidos de consanguinidad."</div>
   <div class="arrow">↓ &nbsp;LLM extrae 11 fenotipos · OLS4 aterriza a 10 términos HPO oficiales</div>
-  <div><span class="hpo" title="infecciones respiratorias de repetición (neumonías y bronquitis frecuentes)">Recurrent respiratory infections <code>HP:0002205</code></span><span class="hpo" title="neumonías">Recurrent pneumonia <code>HP:0006532</code></span><span class="hpo" title="bronquitis frecuentes">Recurrent bronchitis <code>HP:0002837</code></span><span class="hpo" title="Deposiciones abundantes, grasas y malolientes compatibles con esteatorrea">Steatorrhea <code>HP:0002570</code></span><span class="hpo" title="No gana peso adecuadamente pese a apetito conservado">Failure to thrive <code>HP:0001508</code></span><span class="hpo" title="íleo meconial al nacimiento que requirió cirugía">Meconium ileus <code>HP:0004401</code></span><span class="hpo" title="acropaquias incipientes">Clubbing of fingers <code>HP:0100759</code></span><span class="hpo" title="distensión abdominal">Abdominal distention <code>HP:0003270</code></span><span class="hpo" title="">Productive cough <code>HP:0031245</code></span><span class="hpo" title="">Elevated sweat chloride <code>HP:0012236</code></span></div>
-</div>
-
+  <div><span class="hpo" title="infecciones respiratorias de repetición (neumonías y bronquitis frecuentes)">Recurrent respiratory infections <code>HP:0002205</code></span><span class="hpo" title="neumonías">Recurrent pneumonia <code>HP:0006532</code></span><span class="hpo" title="bronquitis frecuentes">Recurrent bronchitis <code>HP:0002837</code></span><span class="hpo" title="Deposiciones abundantes, grasas y malolientes compatibles con esteatorrea">Steatorrhea <code>HP:0002570</code></span><span class="hpo" title="No gana peso adecuadamente pese a apetito conservado">Failure to thrive <code>HP:0001508</code></span><span class="hpo" title="íleo meconial al nacimiento que requirió cirugía">Meconium ileus <code>HP:0004401</code></span><span class="hpo" title="acropaquias incipientes">Clubbing of fingers <code>HP:0100759</code></span><span class="hpo" title="distensión abdominal">Abdominal distention <code>HP:0003270</code></span><span class="hpo" title="">Productive cough <code>HP:0031245</code></span><span class="hpo" title="">Elevated sweat chloride <code>HP:0012236</code></span></div></div>
 <div class="kpis">
   <div class="kpi"><div class="n" style="color:#16a085">5</div><div class="l">Candidatos priorizados</div></div>
   <div class="kpi"><div class="n" style="color:#8e44ad">4</div><div class="l">Con match HPO directo</div></div>
   <div class="kpi"><div class="n" style="color:#6c3483">6</div><div class="l">Missense puntuados por ESM-2</div></div>
-  <div class="kpi"><div class="n" style="color:#e67e22">1</div><div class="l">Fallo QC</div></div>
-</div>
-
+  <div class="kpi"><div class="n" style="color:#e67e22">1</div><div class="l">Fallo QC</div></div></div>
 <h2>② Ranking diagnóstico (variante × fenotipo)</h2>
 <table class="sum"><thead><tr><th>#</th><th>Gen</th><th>Variante</th><th>GT</th><th>gnomAD</th><th>ClinVar</th><th>ESM-2 LLR</th><th>Clase</th><th>Var</th><th>Feno</th><th>Comb</th><th>QC</th></tr></thead>
 <tbody><tr><td>1</td><td><b>CFTR</b></td>
@@ -72,7 +71,7 @@ footer{text-align:center;color:var(--mut);font-size:11px;margin:26px 0 10px}
       <td class="num"><b>0.61</b></td><td>PASS</td></tr><tr><td>3</td><td><b>BRCA1</b></td>
       <td>17:43063903 G&gt;T</td><td>0/1</td><td>4.79e-06</td>
       <td>Pathogenic ★★★</td>
-      <td>0.207</td>
+      <td>0.368</td>
       <td style="color:#e67e22;font-weight:600">Likely pathogenic</td>
       <td class="num">0.92</td><td class="num" style="color:#8e44ad">0.14</td>
       <td class="num"><b>0.57</b></td><td>PASS</td></tr><tr><td>4</td><td><b>MYOC</b></td>
@@ -108,32 +107,26 @@ footer{text-align:center;color:var(--mut);font-size:11px;margin:26px 0 10px}
       <td class="num"><b>0.19</b></td><td>PASS</td></tr><tr><td>9</td><td><b>EGFR</b></td>
       <td>7:55191822 T&gt;G</td><td>0/1</td><td>absent</td>
       <td>drug response ★★★</td>
-      <td>-5.553</td>
+      <td>-6.255</td>
       <td style="color:#e67e22;font-weight:600">Likely pathogenic</td>
       <td class="num">0.68</td><td class="num" style="color:#8e44ad">0.00</td>
       <td class="num"><b>0.19</b></td><td>LowQual</td></tr><tr><td>10</td><td><b>TP53</b></td>
       <td>17:7676154 G&gt;C</td><td>1/1</td><td>0.716</td>
       <td>Benign ★★★</td>
-      <td>-2.459</td>
+      <td>-3.318</td>
       <td style="color:#2ecc71;font-weight:600">Benign</td>
-      <td class="num">0.00</td><td class="num" style="color:#8e44ad">0.00</td>
-      <td class="num"><b>0.00</b></td><td>PASS</td></tr></tbody></table>
+      <td class="num">0.08</td><td class="num" style="color:#8e44ad">0.00</td>
+      <td class="num"><b>0.04</b></td><td>PASS</td></tr></tbody></table>
 <p style="font-size:11px;color:#7f8c8d">Var = score de variante (ACMG-lite ajustado por ESM-2). Feno = coincidencia HPO. Combinado = 0.55·Var + 0.45·Feno (×0.5 si falla QC). ESM-2 LLR más negativo ⇒ más deletéreo.</p>
-
 <h2>Candidatos diagnósticos prioritarios</h2>
-
-    <div class="card" style="border-left:6px solid #e67e22">
-      <div class="chead">
-        <span class="pri">#1</span>
-        <span class="gene">CFTR</span>
+<div class="card" style="border-left:6px solid #e67e22">
+      <div class="chead"><span class="pri">#1</span><span class="gene">CFTR</span>
         <span class="hgvs">IF/I</span>
-        <span class="call" style="background:#e67e22">Likely pathogenic</span>
-      </div>
+        <span class="call" style="background:#e67e22">Likely pathogenic</span></div>
       <div class="scores">
         <div class="sc"><span>Variante (ACMG+ESM)</span><div class="bar"><div class="fill" style="width:89%;background:#2980b9"></div></div><b>0.89</b></div>
         <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:68%;background:#8e44ad"></div></div><b>0.69</b></div>
-        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:79%;background:#16a085"></div></div><b>0.80</b></div>
-      </div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:79%;background:#16a085"></div></div><b>0.80</b></div></div>
       <div style="margin:6px 0"><span class="esm none">—</span></div>
       <div class="phenobox"><b>Coincidencia fenotípica:</b> 4 término(s) HPO directo(s), 6 con expansión ontológica · enfermedad: <i>cystic fibrosis</i><br><span class="shared">Compartidos: Failure to thrive; Ileus; Meconium ileus; Exocrine pancreatic insufficiency; Elevated sweat chloride</span></div>
       <table class="meta">
@@ -141,23 +134,16 @@ footer{text-align:center;color:var(--mut);font-size:11px;margin:26px 0 10px}
         <tr><td>Consecuencia</td><td>inframe_insertion</td><td>gnomAD AF</td><td>absent</td></tr>
         <tr><td>ClinVar</td><td>Pathogenic ★★★★</td><td>Restricción</td><td>pLI 0.00 · LOEUF 1.19</td></tr>
         <tr><td>Condición</td><td colspan=3>Cystic fibrosis</td></tr>
-        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
-      </table>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr></table>
       <div class="tags"><span class="tag">PM2</span><span class="tag">PS_ClinVar</span></div>
-      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>PM2: absent from gnomAD r4</li><li>PS_ClinVar: ClinVar Pathogenic (4★, practice guideline)</li></ul></details>
-    </div>
-    <div class="card" style="border-left:6px solid #e67e22">
-      <div class="chead">
-        <span class="pri">#2</span>
-        <span class="gene">BRCA1</span>
-        <span class="hgvs">Q1756fs, Q1777fs, Q652fs, Q1709fs</span>
-        <span class="call" style="background:#e67e22">Likely pathogenic</span>
-      </div>
+      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>PM2: absent from gnomAD r4</li><li>PS_ClinVar: ClinVar Pathogenic (4★, practice guideline)</li></ul></details></div><div class="card" style="border-left:6px solid #e67e22">
+      <div class="chead"><span class="pri">#2</span><span class="gene">BRCA1</span>
+        <span class="hgvs">Q1756fs</span>
+        <span class="call" style="background:#e67e22">Likely pathogenic</span></div>
       <div class="scores">
         <div class="sc"><span>Variante (ACMG+ESM)</span><div class="bar"><div class="fill" style="width:100%;background:#2980b9"></div></div><b>1.00</b></div>
         <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:14%;background:#8e44ad"></div></div><b>0.14</b></div>
-        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:61%;background:#16a085"></div></div><b>0.61</b></div>
-      </div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:61%;background:#16a085"></div></div><b>0.61</b></div></div>
       <div style="margin:6px 0"><span class="esm none">—</span></div>
       <div class="phenobox"><b>Coincidencia fenotípica:</b> 1 término(s) HPO directo(s), 1 con expansión ontológica · enfermedad: <i>Fanconi anemia, complementation group S</i><br><span class="shared">Compartidos: Failure to thrive</span></div>
       <table class="meta">
@@ -165,47 +151,33 @@ footer{text-align:center;color:var(--mut);font-size:11px;margin:26px 0 10px}
         <tr><td>Consecuencia</td><td>frameshift_variant</td><td>gnomAD AF</td><td>absent</td></tr>
         <tr><td>ClinVar</td><td>Pathogenic ★★★</td><td>Restricción</td><td>pLI 0.00 · LOEUF 0.93</td></tr>
         <tr><td>Condición</td><td colspan=3>Breast-ovarian cancer, familial, susceptibility to, 1</td></tr>
-        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
-      </table>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr></table>
       <div class="tags"><span class="tag">PM2</span><span class="tag">PVS1_mod</span><span class="tag">PS_ClinVar</span></div>
-      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>PM2: absent from gnomAD r4</li><li>PVS1_mod: frameshift_variant (predicted LoF</li><li>gene constraint modest)</li><li>PS_ClinVar: ClinVar Pathogenic (3★, reviewed by expert panel)</li></ul></details>
-    </div>
-    <div class="card" style="border-left:6px solid #e67e22">
-      <div class="chead">
-        <span class="pri">#3</span>
-        <span class="gene">BRCA1</span>
-        <span class="hgvs">A1708E, A1661E, A1729E, A604E, A1580E, A1618E, A1619E, A1638E, A1659E, A1411E, A1539E, A1595E, A1641E, A1660E, A1666E, A1688E, A1730E, A437E, A478E, A495E, A535E, A538E, A562E, A564E, A566E, A578E, A627E, A1554E, A1579E, A1581E, A1596E, A1620E, A1636E, A1664E, A1681E, A428E, A496E, A517E, A525E, A533E, A563E, A579E, A601E, A605E, A839E, A1667E, A1704E, A1705E, A1706E, A477E, A515E, A516E, A557E, A560E, A580E, A603E, A626E, A1412E, A1597E, A1637E, A1639E, A1665E, A1680E, A1682E, A1689E, A1703E, A1707E, A1728E, A296E, A491E, A492E, A523E, A534E, A537E, A556E, A558E, A565E, A602E, A840E</span>
-        <span class="call" style="background:#e67e22">Likely pathogenic</span>
-      </div>
+      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>PM2: absent from gnomAD r4</li><li>PVS1_mod: frameshift_variant (predicted LoF</li><li>gene constraint modest)</li><li>PS_ClinVar: ClinVar Pathogenic (3★, reviewed by expert panel)</li></ul></details></div><div class="card" style="border-left:6px solid #e67e22">
+      <div class="chead"><span class="pri">#3</span><span class="gene">BRCA1</span>
+        <span class="hgvs">p.A566E</span>
+        <span class="call" style="background:#e67e22">Likely pathogenic</span></div>
       <div class="scores">
         <div class="sc"><span>Variante (ACMG+ESM)</span><div class="bar"><div class="fill" style="width:92%;background:#2980b9"></div></div><b>0.92</b></div>
         <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:14%;background:#8e44ad"></div></div><b>0.14</b></div>
-        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:56%;background:#16a085"></div></div><b>0.57</b></div>
-      </div>
-      <div style="margin:6px 0"><span class="esm" style="background:#27ae60">ESM-2 0.207 · tolerated</span></div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:56%;background:#16a085"></div></div><b>0.57</b></div></div>
+      <div style="margin:6px 0"><span class="esm" style="background:#27ae60">ESM-2 0.368 · tolerated</span></div>
       <div class="phenobox"><b>Coincidencia fenotípica:</b> 1 término(s) HPO directo(s), 1 con expansión ontológica · enfermedad: <i>Fanconi anemia, complementation group S</i><br><span class="shared">Compartidos: Failure to thrive</span></div>
       <table class="meta">
         <tr><td>Variante</td><td>17:43063903 G&gt;T (rs28897696)</td><td>Genotipo</td><td>0/1 (het)</td></tr>
         <tr><td>Consecuencia</td><td>missense_variant</td><td>gnomAD AF</td><td>4.79e-06</td></tr>
         <tr><td>ClinVar</td><td>Pathogenic ★★★</td><td>Restricción</td><td>pLI 0.00 · LOEUF 0.93</td></tr>
         <tr><td>Condición</td><td colspan=3>Breast-ovarian cancer, familial, susceptibility to, 1</td></tr>
-        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
-      </table>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr></table>
       <div class="tags"><span class="tag">PM2</span><span class="tag">PP3</span><span class="tag">PS_ClinVar</span><span class="tag">BP4_ESM</span></div>
-      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>PM2: gnomAD AF 4.79e-06 &lt;0.01%</li><li>PP3: SIFT deleterious &amp; PolyPhen possibly_damaging</li><li>PS_ClinVar: ClinVar Pathogenic (3★, reviewed by expert panel)</li><li>BP4_ESM: ESM-2 LLR 0.207 (tolerated)</li></ul></details>
-    </div>
-    <div class="card" style="border-left:6px solid #e67e22">
-      <div class="chead">
-        <span class="pri">#4</span>
-        <span class="gene">MYOC</span>
+      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>PM2: gnomAD AF 4.79e-06 &lt;0.01%</li><li>PP3: SIFT deleterious &amp; PolyPhen possibly_damaging</li><li>PS_ClinVar: ClinVar Pathogenic (3★, reviewed by expert panel)</li><li>BP4_ESM: ESM-2 LLR 0.368 (tolerated)</li></ul></details></div><div class="card" style="border-left:6px solid #e67e22">
+      <div class="chead"><span class="pri">#4</span><span class="gene">MYOC</span>
         <span class="hgvs">Q368*</span>
-        <span class="call" style="background:#e67e22">Likely pathogenic</span>
-      </div>
+        <span class="call" style="background:#e67e22">Likely pathogenic</span></div>
       <div class="scores">
         <div class="sc"><span>Variante (ACMG+ESM)</span><div class="bar"><div class="fill" style="width:89%;background:#2980b9"></div></div><b>0.89</b></div>
         <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:0%;background:#8e44ad"></div></div><b>0.00</b></div>
-        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:49%;background:#16a085"></div></div><b>0.49</b></div>
-      </div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:49%;background:#16a085"></div></div><b>0.49</b></div></div>
       <div style="margin:6px 0"><span class="esm none">—</span></div>
       
       <table class="meta">
@@ -213,23 +185,16 @@ footer{text-align:center;color:var(--mut);font-size:11px;margin:26px 0 10px}
         <tr><td>Consecuencia</td><td>stop_gained</td><td>gnomAD AF</td><td>0.001</td></tr>
         <tr><td>ClinVar</td><td>Pathogenic ★★★</td><td>Restricción</td><td>pLI 0.00 · LOEUF 1.40</td></tr>
         <tr><td>Condición</td><td colspan=3>Open-angle glaucoma</td></tr>
-        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
-      </table>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr></table>
       <div class="tags"><span class="tag">PVS1_mod</span><span class="tag">PS_ClinVar</span></div>
-      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>PVS1_mod: stop_gained (predicted LoF</li><li>gene constraint modest)</li><li>PS_ClinVar: ClinVar Pathogenic (3★, reviewed by expert panel)</li></ul></details>
-    </div>
-    <div class="card" style="border-left:6px solid #e67e22">
-      <div class="chead">
-        <span class="pri">#5</span>
-        <span class="gene">HBB</span>
-        <span class="hgvs">E7V</span>
-        <span class="call" style="background:#e67e22">Likely pathogenic</span>
-      </div>
+      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>PVS1_mod: stop_gained (predicted LoF</li><li>gene constraint modest)</li><li>PS_ClinVar: ClinVar Pathogenic (3★, reviewed by expert panel)</li></ul></details></div><div class="card" style="border-left:6px solid #e67e22">
+      <div class="chead"><span class="pri">#5</span><span class="gene">HBB</span>
+        <span class="hgvs">p.E7V</span>
+        <span class="call" style="background:#e67e22">Likely pathogenic</span></div>
       <div class="scores">
         <div class="sc"><span>Variante (ACMG+ESM)</span><div class="bar"><div class="fill" style="width:70%;background:#2980b9"></div></div><b>0.70</b></div>
         <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:0%;background:#8e44ad"></div></div><b>0.00</b></div>
-        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:38%;background:#16a085"></div></div><b>0.39</b></div>
-      </div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:38%;background:#16a085"></div></div><b>0.39</b></div></div>
       <div style="margin:6px 0"><span class="esm" style="background:#95a5a6">ESM-2 -2.277 · ambiguous</span></div>
       
       <table class="meta">
@@ -237,26 +202,18 @@ footer{text-align:center;color:var(--mut);font-size:11px;margin:26px 0 10px}
         <tr><td>Consecuencia</td><td>missense_variant</td><td>gnomAD AF</td><td>0.013</td></tr>
         <tr><td>ClinVar</td><td>Pathogenic ★★</td><td>Restricción</td><td>pLI 0.00 · LOEUF 2.76</td></tr>
         <tr><td>Condición</td><td colspan=3>Malaria, susceptibility to; Hb SS disease</td></tr>
-        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
-      </table>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr></table>
       <div class="tags"><span class="tag">BS1</span><span class="tag">PS_ClinVar</span></div>
-      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>BS1: gnomAD AF 0.013 ≥1%</li><li>PS_ClinVar: ClinVar Pathogenic (2★, criteria provided, multiple submitters, no conflicts)</li><li>ESM2: LLR -2.277 (ambiguous)</li></ul></details>
-    </div>
-
+      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>BS1: gnomAD AF 0.013 ≥1%</li><li>PS_ClinVar: ClinVar Pathogenic (2★, criteria provided, multiple submitters, no conflicts)</li><li>ESM2: LLR -2.277 (ambiguous)</li></ul></details></div>
 <h2>Hallazgos farmacogenómicos</h2>
-
-    <div class="card" style="border-left:6px solid #2ecc71">
-      <div class="chead">
-        <span class="pri">#6</span>
-        <span class="gene">MTHFR</span>
-        <span class="hgvs">A222V, A263V</span>
-        <span class="call" style="background:#2ecc71">Benign / Likely benign | Pharmacogenomic (drug response)</span>
-      </div>
+<div class="card" style="border-left:6px solid #2ecc71">
+      <div class="chead"><span class="pri">#6</span><span class="gene">MTHFR</span>
+        <span class="hgvs">p.A222V</span>
+        <span class="call" style="background:#2ecc71">Benign / Likely benign | Pharmacogenomic (drug response)</span></div>
       <div class="scores">
         <div class="sc"><span>Variante (ACMG+ESM)</span><div class="bar"><div class="fill" style="width:40%;background:#2980b9"></div></div><b>0.41</b></div>
         <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:25%;background:#8e44ad"></div></div><b>0.26</b></div>
-        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:33%;background:#16a085"></div></div><b>0.34</b></div>
-      </div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:33%;background:#16a085"></div></div><b>0.34</b></div></div>
       <div style="margin:6px 0"><span class="esm" style="background:#95a5a6">ESM-2 -1.719 · ambiguous</span></div>
       <div class="phenobox"><b>Coincidencia fenotípica:</b> 1 término(s) HPO directo(s), 3 con expansión ontológica · enfermedad: <i>schizophrenia</i><br><span class="shared">Compartidos: Failure to thrive; Decreased body weight</span></div>
       <table class="meta">
@@ -264,23 +221,16 @@ footer{text-align:center;color:var(--mut);font-size:11px;margin:26px 0 10px}
         <tr><td>Consecuencia</td><td>missense_variant</td><td>gnomAD AF</td><td>0.323</td></tr>
         <tr><td>ClinVar</td><td>drug response ★★★</td><td>Restricción</td><td>pLI 0.00 · LOEUF 0.92</td></tr>
         <tr><td>Condición</td><td colspan=3>methotrexate response - Toxicity</td></tr>
-        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
-      </table>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr></table>
       <div class="tags"><span class="tag">BA1</span><span class="tag">PP3</span></div>
-      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>BA1: gnomAD AF 0.323 ≥5% (too common for rare disease)</li><li>PP3: SIFT deleterious &amp; PolyPhen possibly_damaging</li><li>ESM2: LLR -1.719 (ambiguous)</li></ul></details>
-    </div>
-    <div class="card" style="border-left:6px solid #2ecc71">
-      <div class="chead">
-        <span class="pri">#7</span>
-        <span class="gene">APOE</span>
-        <span class="hgvs">R176C, R202C</span>
-        <span class="call" style="background:#2ecc71">Benign / Likely benign | Pharmacogenomic (drug response)</span>
-      </div>
+      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>BA1: gnomAD AF 0.323 ≥5% (too common for rare disease)</li><li>PP3: SIFT deleterious &amp; PolyPhen possibly_damaging</li><li>ESM2: LLR -1.719 (ambiguous)</li></ul></details></div><div class="card" style="border-left:6px solid #2ecc71">
+      <div class="chead"><span class="pri">#7</span><span class="gene">APOE</span>
+        <span class="hgvs">p.R176C</span>
+        <span class="call" style="background:#2ecc71">Benign / Likely benign | Pharmacogenomic (drug response)</span></div>
       <div class="scores">
         <div class="sc"><span>Variante (ACMG+ESM)</span><div class="bar"><div class="fill" style="width:37%;background:#2980b9"></div></div><b>0.38</b></div>
         <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:0%;background:#8e44ad"></div></div><b>0.00</b></div>
-        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:20%;background:#16a085"></div></div><b>0.21</b></div>
-      </div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:20%;background:#16a085"></div></div><b>0.21</b></div></div>
       <div style="margin:6px 0"><span class="esm" style="background:#c0392b">ESM-2 -6.457 · deleterious</span></div>
       
       <table class="meta">
@@ -288,36 +238,26 @@ footer{text-align:center;color:var(--mut);font-size:11px;margin:26px 0 10px}
         <tr><td>Consecuencia</td><td>missense_variant</td><td>gnomAD AF</td><td>0.078</td></tr>
         <tr><td>ClinVar</td><td>drug response ★★★</td><td>Restricción</td><td>pLI 0.00 · LOEUF 1.29</td></tr>
         <tr><td>Condición</td><td colspan=3>atorvastatin response - Efficacy</td></tr>
-        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
-      </table>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr></table>
       <div class="tags"><span class="tag">BA1</span><span class="tag">PP3_ESM</span></div>
-      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>BA1: gnomAD AF 0.078 ≥5% (too common for rare disease)</li><li>PP3_ESM: ESM-2 LLR -6.457 (deleterious)</li></ul></details>
-    </div>
-    <div class="card" style="border-left:6px solid #e67e22">
-      <div class="chead">
-        <span class="pri">#9</span>
-        <span class="gene">EGFR</span>
-        <span class="hgvs">L858R, L591R, L805R, L813R</span>
-        <span class="call" style="background:#e67e22">Likely pathogenic | Pharmacogenomic (drug response)</span>
-      </div>
+      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>BA1: gnomAD AF 0.078 ≥5% (too common for rare disease)</li><li>PP3_ESM: ESM-2 LLR -6.457 (deleterious)</li></ul></details></div><div class="card" style="border-left:6px solid #e67e22">
+      <div class="chead"><span class="pri">#9</span><span class="gene">EGFR</span>
+        <span class="hgvs">p.L858R</span>
+        <span class="call" style="background:#e67e22">Likely pathogenic | Pharmacogenomic (drug response)</span></div>
       <div class="scores">
         <div class="sc"><span>Variante (ACMG+ESM)</span><div class="bar"><div class="fill" style="width:67%;background:#2980b9"></div></div><b>0.68</b></div>
         <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:0%;background:#8e44ad"></div></div><b>0.00</b></div>
-        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:18%;background:#16a085"></div></div><b>0.19</b></div>
-      </div>
-      <div style="margin:6px 0"><span class="esm" style="background:#c0392b">ESM-2 -5.553 · deleterious</span></div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:18%;background:#16a085"></div></div><b>0.19</b></div></div>
+      <div style="margin:6px 0"><span class="esm" style="background:#c0392b">ESM-2 -6.255 · deleterious</span></div>
       
       <table class="meta">
         <tr><td>Variante</td><td>7:55191822 T&gt;G (rs121434568)</td><td>Genotipo</td><td>0/1 (het)</td></tr>
         <tr><td>Consecuencia</td><td>missense_variant</td><td>gnomAD AF</td><td>absent</td></tr>
         <tr><td>ClinVar</td><td>drug response ★★★</td><td>Restricción</td><td>pLI 0.39 · LOEUF 0.50</td></tr>
         <tr><td>Condición</td><td colspan=3>gefitinib response - Efficacy</td></tr>
-        <tr><td>QC</td><td colspan=3><span class="qcflag">⚠ LowQual (DP=12, GQ=33)</span></td></tr>
-      </table>
+        <tr><td>QC</td><td colspan=3><span class="qcflag">⚠ LowQual (DP=12, GQ=33)</span></td></tr></table>
       <div class="tags"><span class="tag">PM2</span><span class="tag">PP3</span><span class="tag">PP3_ESM</span></div>
-      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>PM2: absent from gnomAD r4</li><li>PP3: SIFT deleterious_low_confidence &amp; PolyPhen probably_damaging</li><li>PP3_ESM: ESM-2 LLR -5.553 (deleterious)</li></ul></details>
-    </div>
-
-<div class="footnote"><b>Dos capas de IA en este informe:</b> (1) un <b>LLM</b> extrae los fenotipos de la nota clínica en lenguaje natural y OLS4 los normaliza a HPO; (2) <b>ESM-2</b> (modelo de lenguaje de proteínas de Meta AI) puntúa cada variante missense por verosimilitud evolutiva y refuerza las reglas PP3/BP4. Ambas capas alimentan el motor ACMG-lite, que se combina con el score fenotípico al estilo Exomiser. <b>Sistema de apoyo a la decisión, no diagnóstico.</b> Confirmar por método ortogonal e interpretar por un genetista clínico.</div>
+      <details><summary>Evidencia (ACMG-lite + ESM-2)</summary><ul><li>PM2: absent from gnomAD r4</li><li>PP3: SIFT deleterious_low_confidence &amp; PolyPhen probably_damaging</li><li>PP3_ESM: ESM-2 LLR -6.255 (deleterious)</li></ul></details></div>
+<div class="footnote"><b>Dos capas de IA en este informe:</b> (1) un <b>LLM</b> extrae los fenotipos de la nota clínica en lenguaje natural y OLS4 los normaliza a HPO; (2) <b>ESM-2</b> (modelo de lenguaje de proteínas de Meta AI) puntúa cada variante missense por verosimilitud evolutiva y refuerza las reglas PP3/BP4. <b>Sistema de apoyo a la decisión, no diagnóstico.</b> Confirmar por método ortogonal e interpretar por un genetista clínico.</div>
 <footer>raredx · IA: LLM (extracción HPO) + ESM-2 (missense) · Ensembl · gnomAD · ClinVar · Open Targets · HPO/OLS4</footer>
 </div></body></html>
