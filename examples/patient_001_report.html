@@ -1,0 +1,381 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8">
+<title>Informe de análisis de VCF (con HPO) — PATIENT_001</title>
+<style>
+:root{--bg:#f5f6fa;--ink:#2c3e50;--mut:#7f8c8d}
+*{box-sizing:border-box} body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:var(--bg);color:var(--ink);line-height:1.45}
+.wrap{max-width:1040px;margin:0 auto;padding:24px}
+header{background:#1e2a38;color:#fff;padding:24px 32px;border-radius:10px;margin-bottom:16px}
+header h1{margin:0 0 4px;font-size:22px} header .sub{color:#9fb3c8;font-size:13px}
+.hpobar{background:#fff;border-radius:10px;padding:14px 18px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:16px}
+.hpobar h3{margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
+.hpo{display:inline-block;background:#f3eafc;color:#6c3483;border-radius:14px;padding:3px 11px;font-size:12px;margin:3px}
+.hpo code{color:#8e44ad;font-size:10.5px}
+.kpis{display:flex;gap:12px;margin:16px 0}
+.kpi{flex:1;background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.kpi .n{font-size:26px;font-weight:700} .kpi .l{font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+h2{font-size:16px;border-bottom:2px solid #dfe4ea;padding-bottom:6px;margin-top:26px}
+table.sum{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;font-size:12.5px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+table.sum th{background:#eef1f5;text-align:left;padding:8px;font-size:10.5px;text-transform:uppercase;letter-spacing:.02em;color:var(--mut)}
+table.sum td{padding:7px 8px;border-top:1px solid #eef1f5} td.num{text-align:right;font-variant-numeric:tabular-nums}
+.card{background:#fff;border-radius:10px;padding:16px 18px;margin:14px 0;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.chead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.chead .pri{background:#16a085;color:#fff;border-radius:6px;padding:2px 9px;font-size:13px;font-weight:700}
+.chead .gene{font-size:19px;font-weight:700} .chead .hgvs{color:var(--mut);font-family:monospace}
+.chead .call{margin-left:auto;color:#fff;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600}
+.scores{display:flex;gap:18px;margin:6px 0 10px}
+.sc{flex:1;font-size:11px;color:var(--mut)} .sc b{color:var(--ink);font-size:13px;float:right}
+.bar{height:7px;background:#eef1f5;border-radius:4px;margin:4px 0;overflow:hidden} .fill{height:100%}
+.phenobox{background:#f3eafc;border:1px solid #e1d0f2;border-radius:8px;padding:9px 12px;font-size:12.5px;margin:8px 0;color:#5b2c6f}
+.phenobox .shared{color:#8e44ad;font-size:11.5px}
+table.meta{width:100%;font-size:12.5px;border-collapse:collapse}
+table.meta td{padding:3px 8px} table.meta td:nth-child(odd){color:var(--mut);width:88px;font-size:11px;text-transform:uppercase}
+.tags{margin:8px 0} .tag{display:inline-block;background:#eef1f5;color:#34495e;border-radius:4px;padding:2px 8px;font-size:11px;margin:2px;font-family:monospace;font-weight:600}
+.qcflag{color:#c0392b;font-weight:600} .qcok{color:#27ae60}
+details{margin-top:8px;font-size:12.5px} summary{cursor:pointer;color:#2980b9}
+details ul{margin:6px 0 0 4px;padding-left:18px;color:#34495e}
+.note{background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:12px 16px;font-size:12.5px;color:#795548;margin-top:24px}
+footer{text-align:center;color:var(--mut);font-size:11px;margin:28px 0 10px}
+</style></head><body><div class="wrap">
+<header>
+  <h1>Informe genómico priorizado por fenotipo — Enfermedades raras</h1>
+  <div class="sub">Muestra: <b>PATIENT_001</b> · GRCh38 · 10 variantes · Priorización Exomiser-like (variante ACMG × fenotipo HPO) · 2026-07-05 11:45</div>
+</header>
+<div class="hpobar">
+  <h3>Perfil fenotípico del paciente (7 términos HPO)</h3>
+  <span class="hpo">Recurrent respiratory infections <code>HP:0002205</code></span><span class="hpo">Bronchiectasis <code>HP:0002110</code></span><span class="hpo">Exocrine pancreatic insufficiency <code>HP:0001738</code></span><span class="hpo">Meconium ileus <code>HP:0004401</code></span><span class="hpo">Elevated sweat chloride <code>HP:0012236</code></span><span class="hpo">Failure to thrive <code>HP:0001508</code></span><span class="hpo">Chronic cough <code>HP:0034315</code></span>
+</div>
+<div class="kpis">
+  <div class="kpi"><div class="n" style="color:#16a085">5</div><div class="l">Candidatos priorizados</div></div>
+  <div class="kpi"><div class="n" style="color:#8e44ad">4</div><div class="l">Con match HPO directo</div></div>
+  <div class="kpi"><div class="n" style="color:#c0392b">5</div><div class="l">P / LP</div></div>
+  <div class="kpi"><div class="n" style="color:#e67e22">1</div><div class="l">Fallo QC</div></div>
+</div>
+
+<h2>Ranking diagnóstico (variante × fenotipo)</h2>
+<table class="sum"><thead><tr><th>#</th><th>Gen</th><th>Variante</th><th>GT</th><th>gnomAD</th><th>ClinVar</th><th>Clase</th><th>Var</th><th>Feno</th><th>Comb</th><th>QC</th></tr></thead>
+<tbody><tr>
+      <td>1</td><td><b>CFTR</b></td>
+      <td>7:117559591 TCTT&gt;T</td><td>0/1</td>
+      <td>absent</td>
+      <td>Pathogenic ★★★★</td>
+      <td style="color:#e67e22;font-weight:600">Likely pathogenic</td>
+      <td class="num">0.89</td>
+      <td class="num" style="color:#8e44ad">0.69</td>
+      <td class="num"><b>0.80</b></td>
+      <td>PASS</td></tr><tr>
+      <td>2</td><td><b>BRCA1</b></td>
+      <td>17:43057063 GGG&gt;GGGG</td><td>0/1</td>
+      <td>absent</td>
+      <td>Pathogenic ★★★</td>
+      <td style="color:#e67e22;font-weight:600">Likely pathogenic</td>
+      <td class="num">1.00</td>
+      <td class="num" style="color:#8e44ad">0.14</td>
+      <td class="num"><b>0.61</b></td>
+      <td>PASS</td></tr><tr>
+      <td>3</td><td><b>BRCA1</b></td>
+      <td>17:43063903 G&gt;T</td><td>0/1</td>
+      <td>4.79e-06</td>
+      <td>Pathogenic ★★★</td>
+      <td style="color:#e67e22;font-weight:600">Likely pathogenic</td>
+      <td class="num">1.00</td>
+      <td class="num" style="color:#8e44ad">0.14</td>
+      <td class="num"><b>0.61</b></td>
+      <td>PASS</td></tr><tr>
+      <td>4</td><td><b>MYOC</b></td>
+      <td>1:171636338 G&gt;A</td><td>0/1</td>
+      <td>0.001</td>
+      <td>Pathogenic ★★★</td>
+      <td style="color:#e67e22;font-weight:600">Likely pathogenic</td>
+      <td class="num">0.89</td>
+      <td class="num" style="color:#8e44ad">0.00</td>
+      <td class="num"><b>0.49</b></td>
+      <td>PASS</td></tr><tr>
+      <td>5</td><td><b>HBB</b></td>
+      <td>11:5227002 T&gt;A</td><td>0/1</td>
+      <td>0.013</td>
+      <td>Pathogenic ★★</td>
+      <td style="color:#e67e22;font-weight:600">Likely pathogenic</td>
+      <td class="num">0.70</td>
+      <td class="num" style="color:#8e44ad">0.00</td>
+      <td class="num"><b>0.39</b></td>
+      <td>PASS</td></tr><tr>
+      <td>6</td><td><b>MTHFR</b></td>
+      <td>1:11796321 G&gt;A</td><td>0/1</td>
+      <td>0.323</td>
+      <td>drug response ★★★</td>
+      <td style="color:#2ecc71;font-weight:600">Benign</td>
+      <td class="num">0.41</td>
+      <td class="num" style="color:#8e44ad">0.26</td>
+      <td class="num"><b>0.34</b></td>
+      <td>PASS</td></tr><tr>
+      <td>7</td><td><b>MCM6</b></td>
+      <td>2:135851076 G&gt;A</td><td>1/1</td>
+      <td>0.397</td>
+      <td>association </td>
+      <td style="color:#2ecc71;font-weight:600">Benign</td>
+      <td class="num">0.30</td>
+      <td class="num" style="color:#8e44ad">0.06</td>
+      <td class="num"><b>0.19</b></td>
+      <td>PASS</td></tr><tr>
+      <td>8</td><td><b>EGFR</b></td>
+      <td>7:55191822 T&gt;G</td><td>0/1</td>
+      <td>absent</td>
+      <td>drug response ★★★</td>
+      <td style="color:#e67e22;font-weight:600">Likely pathogenic</td>
+      <td class="num">0.59</td>
+      <td class="num" style="color:#8e44ad">0.00</td>
+      <td class="num"><b>0.16</b></td>
+      <td>LowQual</td></tr><tr>
+      <td>9</td><td><b>APOE</b></td>
+      <td>19:44908822 C&gt;T</td><td>0/1</td>
+      <td>0.078</td>
+      <td>drug response ★★★</td>
+      <td style="color:#2ecc71;font-weight:600">Benign</td>
+      <td class="num">0.30</td>
+      <td class="num" style="color:#8e44ad">0.00</td>
+      <td class="num"><b>0.16</b></td>
+      <td>PASS</td></tr><tr>
+      <td>10</td><td><b>TP53</b></td>
+      <td>17:7676154 G&gt;C</td><td>1/1</td>
+      <td>0.716</td>
+      <td>Benign ★★★</td>
+      <td style="color:#2ecc71;font-weight:600">Benign</td>
+      <td class="num">0.00</td>
+      <td class="num" style="color:#8e44ad">0.00</td>
+      <td class="num"><b>0.00</b></td>
+      <td>PASS</td></tr></tbody></table>
+<p style="font-size:11.5px;color:#7f8c8d">Combinado = 0.55·variante + 0.45·fenotipo; penalización ×0.5 por fallo de QC. «Var» y «Feno» normalizados 0–1.</p>
+
+<h2>Candidatos diagnósticos prioritarios</h2>
+
+    <div class="card" style="border-left:6px solid #e67e22">
+      <div class="chead">
+        <span class="pri">#1</span>
+        <span class="gene">CFTR</span>
+        <span class="hgvs">IF/I</span>
+        <span class="call" style="background:#e67e22">Likely pathogenic</span>
+      </div>
+      <div class="scores">
+        <div class="sc"><span>Variante (ACMG)</span><div class="bar"><div class="fill" style="width:89%;background:#2980b9"></div></div><b>0.89</b></div>
+        <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:68%;background:#8e44ad"></div></div><b>0.69</b></div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:79%;background:#16a085"></div></div><b>0.80</b></div>
+      </div>
+      <div class="phenobox">
+          <b>Coincidencia fenotípica:</b> 4 término(s) HPO directo(s), 6 con expansión ontológica
+          &nbsp;·&nbsp; enfermedad: <i>cystic fibrosis</i>
+          <br><span class="shared">Compartidos: Failure to thrive; Ileus; Meconium ileus; Exocrine pancreatic insufficiency; Elevated sweat chloride</span>
+        </div>
+      <table class="meta">
+        <tr><td>Variante</td><td>7:117559591 TCTT&gt;T (rs113993960)</td>
+            <td>Genotipo</td><td>0/1 (het)</td></tr>
+        <tr><td>Consecuencia</td><td>inframe_insertion</td>
+            <td>gnomAD AF</td><td>absent</td></tr>
+        <tr><td>ClinVar</td><td>Pathogenic ★★★★</td>
+            <td>Restricción</td><td>pLI 0.00 · LOEUF 1.19</td></tr>
+        <tr><td>Condición</td><td colspan=3>Cystic fibrosis</td></tr>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
+      </table>
+      <div class="tags"><span class="tag">PM2</span><span class="tag">PS_ClinVar</span></div>
+      <details><summary>Evidencia ACMG-lite</summary><ul><li>PM2: absent from gnomAD r4</li><li>PS_ClinVar: ClinVar Pathogenic (4★, practice guideline)</li></ul></details>
+    </div>
+    <div class="card" style="border-left:6px solid #e67e22">
+      <div class="chead">
+        <span class="pri">#2</span>
+        <span class="gene">BRCA1</span>
+        <span class="hgvs">Q1756fs, Q1777fs, Q652fs, Q1709fs</span>
+        <span class="call" style="background:#e67e22">Likely pathogenic</span>
+      </div>
+      <div class="scores">
+        <div class="sc"><span>Variante (ACMG)</span><div class="bar"><div class="fill" style="width:100%;background:#2980b9"></div></div><b>1.00</b></div>
+        <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:14%;background:#8e44ad"></div></div><b>0.14</b></div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:61%;background:#16a085"></div></div><b>0.61</b></div>
+      </div>
+      <div class="phenobox">
+          <b>Coincidencia fenotípica:</b> 1 término(s) HPO directo(s), 1 con expansión ontológica
+          &nbsp;·&nbsp; enfermedad: <i>Fanconi anemia, complementation group S</i>
+          <br><span class="shared">Compartidos: Failure to thrive</span>
+        </div>
+      <table class="meta">
+        <tr><td>Variante</td><td>17:43057063 GGG&gt;GGGG (rs80357906)</td>
+            <td>Genotipo</td><td>0/1 (het)</td></tr>
+        <tr><td>Consecuencia</td><td>frameshift_variant</td>
+            <td>gnomAD AF</td><td>absent</td></tr>
+        <tr><td>ClinVar</td><td>Pathogenic ★★★</td>
+            <td>Restricción</td><td>pLI 0.00 · LOEUF 0.93</td></tr>
+        <tr><td>Condición</td><td colspan=3>Breast-ovarian cancer, familial, susceptibility to, 1</td></tr>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
+      </table>
+      <div class="tags"><span class="tag">PM2</span><span class="tag">PVS1_mod</span><span class="tag">PS_ClinVar</span></div>
+      <details><summary>Evidencia ACMG-lite</summary><ul><li>PM2: absent from gnomAD r4</li><li>PVS1_mod: frameshift_variant (predicted LoF</li><li>gene constraint modest)</li><li>PS_ClinVar: ClinVar Pathogenic (3★, reviewed by expert panel)</li></ul></details>
+    </div>
+    <div class="card" style="border-left:6px solid #e67e22">
+      <div class="chead">
+        <span class="pri">#3</span>
+        <span class="gene">BRCA1</span>
+        <span class="hgvs">A1708E, A1661E, A1729E, A604E, A1580E, A1618E, A1619E, A1638E, A1659E, A1411E, A1539E, A1595E, A1641E, A1660E, A1666E, A1688E, A1730E, A437E, A478E, A495E, A535E, A538E, A562E, A564E, A566E, A578E, A627E, A1554E, A1579E, A1581E, A1596E, A1620E, A1636E, A1664E, A1681E, A428E, A496E, A517E, A525E, A533E, A563E, A579E, A601E, A605E, A839E, A1667E, A1704E, A1705E, A1706E, A477E, A515E, A516E, A557E, A560E, A580E, A603E, A626E, A1412E, A1597E, A1637E, A1639E, A1665E, A1680E, A1682E, A1689E, A1703E, A1707E, A1728E, A296E, A491E, A492E, A523E, A534E, A537E, A556E, A558E, A565E, A602E, A840E</span>
+        <span class="call" style="background:#e67e22">Likely pathogenic</span>
+      </div>
+      <div class="scores">
+        <div class="sc"><span>Variante (ACMG)</span><div class="bar"><div class="fill" style="width:100%;background:#2980b9"></div></div><b>1.00</b></div>
+        <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:14%;background:#8e44ad"></div></div><b>0.14</b></div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:61%;background:#16a085"></div></div><b>0.61</b></div>
+      </div>
+      <div class="phenobox">
+          <b>Coincidencia fenotípica:</b> 1 término(s) HPO directo(s), 1 con expansión ontológica
+          &nbsp;·&nbsp; enfermedad: <i>Fanconi anemia, complementation group S</i>
+          <br><span class="shared">Compartidos: Failure to thrive</span>
+        </div>
+      <table class="meta">
+        <tr><td>Variante</td><td>17:43063903 G&gt;T (rs28897696)</td>
+            <td>Genotipo</td><td>0/1 (het)</td></tr>
+        <tr><td>Consecuencia</td><td>missense_variant</td>
+            <td>gnomAD AF</td><td>4.79e-06</td></tr>
+        <tr><td>ClinVar</td><td>Pathogenic ★★★</td>
+            <td>Restricción</td><td>pLI 0.00 · LOEUF 0.93</td></tr>
+        <tr><td>Condición</td><td colspan=3>Breast-ovarian cancer, familial, susceptibility to, 1</td></tr>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
+      </table>
+      <div class="tags"><span class="tag">PM2</span><span class="tag">PP3</span><span class="tag">PS_ClinVar</span></div>
+      <details><summary>Evidencia ACMG-lite</summary><ul><li>PM2: gnomAD AF 4.79e-06 &lt;0.01%</li><li>PP3: SIFT deleterious &amp; PolyPhen possibly_damaging</li><li>PS_ClinVar: ClinVar Pathogenic (3★, reviewed by expert panel)</li></ul></details>
+    </div>
+    <div class="card" style="border-left:6px solid #e67e22">
+      <div class="chead">
+        <span class="pri">#4</span>
+        <span class="gene">MYOC</span>
+        <span class="hgvs">Q368*</span>
+        <span class="call" style="background:#e67e22">Likely pathogenic</span>
+      </div>
+      <div class="scores">
+        <div class="sc"><span>Variante (ACMG)</span><div class="bar"><div class="fill" style="width:89%;background:#2980b9"></div></div><b>0.89</b></div>
+        <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:0%;background:#8e44ad"></div></div><b>0.00</b></div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:49%;background:#16a085"></div></div><b>0.49</b></div>
+      </div>
+      
+      <table class="meta">
+        <tr><td>Variante</td><td>1:171636338 G&gt;A (rs74315329)</td>
+            <td>Genotipo</td><td>0/1 (het)</td></tr>
+        <tr><td>Consecuencia</td><td>stop_gained</td>
+            <td>gnomAD AF</td><td>0.001</td></tr>
+        <tr><td>ClinVar</td><td>Pathogenic ★★★</td>
+            <td>Restricción</td><td>pLI 0.00 · LOEUF 1.40</td></tr>
+        <tr><td>Condición</td><td colspan=3>Open-angle glaucoma</td></tr>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
+      </table>
+      <div class="tags"><span class="tag">PVS1_mod</span><span class="tag">PS_ClinVar</span></div>
+      <details><summary>Evidencia ACMG-lite</summary><ul><li>PVS1_mod: stop_gained (predicted LoF</li><li>gene constraint modest)</li><li>PS_ClinVar: ClinVar Pathogenic (3★, reviewed by expert panel)</li></ul></details>
+    </div>
+    <div class="card" style="border-left:6px solid #e67e22">
+      <div class="chead">
+        <span class="pri">#5</span>
+        <span class="gene">HBB</span>
+        <span class="hgvs">E7V</span>
+        <span class="call" style="background:#e67e22">Likely pathogenic</span>
+      </div>
+      <div class="scores">
+        <div class="sc"><span>Variante (ACMG)</span><div class="bar"><div class="fill" style="width:70%;background:#2980b9"></div></div><b>0.70</b></div>
+        <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:0%;background:#8e44ad"></div></div><b>0.00</b></div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:38%;background:#16a085"></div></div><b>0.39</b></div>
+      </div>
+      
+      <table class="meta">
+        <tr><td>Variante</td><td>11:5227002 T&gt;A (rs334)</td>
+            <td>Genotipo</td><td>0/1 (het)</td></tr>
+        <tr><td>Consecuencia</td><td>missense_variant</td>
+            <td>gnomAD AF</td><td>0.013</td></tr>
+        <tr><td>ClinVar</td><td>Pathogenic ★★</td>
+            <td>Restricción</td><td>pLI 0.00 · LOEUF 2.76</td></tr>
+        <tr><td>Condición</td><td colspan=3>Malaria, susceptibility to; Hb SS disease</td></tr>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
+      </table>
+      <div class="tags"><span class="tag">BS1</span><span class="tag">PS_ClinVar</span></div>
+      <details><summary>Evidencia ACMG-lite</summary><ul><li>BS1: gnomAD AF 0.013 ≥1%</li><li>PS_ClinVar: ClinVar Pathogenic (2★, criteria provided, multiple submitters, no conflicts)</li></ul></details>
+    </div>
+
+<h2>Hallazgos farmacogenómicos (independientes del fenotipo)</h2>
+
+    <div class="card" style="border-left:6px solid #2ecc71">
+      <div class="chead">
+        <span class="pri">#6</span>
+        <span class="gene">MTHFR</span>
+        <span class="hgvs">A222V, A263V</span>
+        <span class="call" style="background:#2ecc71">Benign / Likely benign | Pharmacogenomic (drug response)</span>
+      </div>
+      <div class="scores">
+        <div class="sc"><span>Variante (ACMG)</span><div class="bar"><div class="fill" style="width:40%;background:#2980b9"></div></div><b>0.41</b></div>
+        <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:25%;background:#8e44ad"></div></div><b>0.26</b></div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:33%;background:#16a085"></div></div><b>0.34</b></div>
+      </div>
+      <div class="phenobox">
+          <b>Coincidencia fenotípica:</b> 1 término(s) HPO directo(s), 3 con expansión ontológica
+          &nbsp;·&nbsp; enfermedad: <i>schizophrenia</i>
+          <br><span class="shared">Compartidos: Failure to thrive; Decreased body weight</span>
+        </div>
+      <table class="meta">
+        <tr><td>Variante</td><td>1:11796321 G&gt;A (rs1801133)</td>
+            <td>Genotipo</td><td>0/1 (het)</td></tr>
+        <tr><td>Consecuencia</td><td>missense_variant</td>
+            <td>gnomAD AF</td><td>0.323</td></tr>
+        <tr><td>ClinVar</td><td>drug response ★★★</td>
+            <td>Restricción</td><td>pLI 0.00 · LOEUF 0.92</td></tr>
+        <tr><td>Condición</td><td colspan=3>methotrexate response - Toxicity</td></tr>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
+      </table>
+      <div class="tags"><span class="tag">BA1</span><span class="tag">PP3</span></div>
+      <details><summary>Evidencia ACMG-lite</summary><ul><li>BA1: gnomAD AF 0.323 ≥5% (too common for rare disease)</li><li>PP3: SIFT deleterious &amp; PolyPhen possibly_damaging</li></ul></details>
+    </div>
+    <div class="card" style="border-left:6px solid #e67e22">
+      <div class="chead">
+        <span class="pri">#8</span>
+        <span class="gene">EGFR</span>
+        <span class="hgvs">L858R, L591R, L805R, L813R</span>
+        <span class="call" style="background:#e67e22">Likely pathogenic | Pharmacogenomic (drug response)</span>
+      </div>
+      <div class="scores">
+        <div class="sc"><span>Variante (ACMG)</span><div class="bar"><div class="fill" style="width:59%;background:#2980b9"></div></div><b>0.59</b></div>
+        <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:0%;background:#8e44ad"></div></div><b>0.00</b></div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:16%;background:#16a085"></div></div><b>0.16</b></div>
+      </div>
+      
+      <table class="meta">
+        <tr><td>Variante</td><td>7:55191822 T&gt;G (rs121434568)</td>
+            <td>Genotipo</td><td>0/1 (het)</td></tr>
+        <tr><td>Consecuencia</td><td>missense_variant</td>
+            <td>gnomAD AF</td><td>absent</td></tr>
+        <tr><td>ClinVar</td><td>drug response ★★★</td>
+            <td>Restricción</td><td>pLI 0.39 · LOEUF 0.50</td></tr>
+        <tr><td>Condición</td><td colspan=3>gefitinib response - Efficacy</td></tr>
+        <tr><td>QC</td><td colspan=3><span class="qcflag">⚠ LowQual (DP=12, GQ=33)</span></td></tr>
+      </table>
+      <div class="tags"><span class="tag">PM2</span><span class="tag">PP3</span></div>
+      <details><summary>Evidencia ACMG-lite</summary><ul><li>PM2: absent from gnomAD r4</li><li>PP3: SIFT deleterious_low_confidence &amp; PolyPhen probably_damaging</li></ul></details>
+    </div>
+    <div class="card" style="border-left:6px solid #2ecc71">
+      <div class="chead">
+        <span class="pri">#9</span>
+        <span class="gene">APOE</span>
+        <span class="hgvs">R176C, R202C</span>
+        <span class="call" style="background:#2ecc71">Benign / Likely benign | Pharmacogenomic (drug response)</span>
+      </div>
+      <div class="scores">
+        <div class="sc"><span>Variante (ACMG)</span><div class="bar"><div class="fill" style="width:29%;background:#2980b9"></div></div><b>0.30</b></div>
+        <div class="sc"><span>Fenotipo (HPO)</span><div class="bar"><div class="fill" style="width:0%;background:#8e44ad"></div></div><b>0.00</b></div>
+        <div class="sc"><span>Combinado</span><div class="bar"><div class="fill" style="width:16%;background:#16a085"></div></div><b>0.16</b></div>
+      </div>
+      
+      <table class="meta">
+        <tr><td>Variante</td><td>19:44908822 C&gt;T (rs7412)</td>
+            <td>Genotipo</td><td>0/1 (het)</td></tr>
+        <tr><td>Consecuencia</td><td>missense_variant</td>
+            <td>gnomAD AF</td><td>0.078</td></tr>
+        <tr><td>ClinVar</td><td>drug response ★★★</td>
+            <td>Restricción</td><td>pLI 0.00 · LOEUF 1.29</td></tr>
+        <tr><td>Condición</td><td colspan=3>atorvastatin response - Efficacy</td></tr>
+        <tr><td>QC</td><td colspan=3><span class="qcok">PASS · DP=50</span></td></tr>
+      </table>
+      <div class="tags"><span class="tag">BA1</span></div>
+      <details><summary>Evidencia ACMG-lite</summary><ul><li>BA1: gnomAD AF 0.078 ≥5% (too common for rare disease)</li></ul></details>
+    </div>
+
+<div class="note"><b>Metodología.</b> Consecuencia funcional (Ensembl VEP), frecuencia + restricción génica pLI/LOEUF (gnomAD r4) y significancia clínica ponderada por estrellas (ClinVar) → score de variante ACMG-lite. En paralelo, los términos HPO del paciente se expanden por la ontología (ancestros) y se cruzan con los fenotipos HPO de las enfermedades asociadas a cada gen candidato (Open Targets) → score fenotípico. El ranking final combina ambos, al estilo de Exomiser/Exomiser-hiPHIVE. <b>Sistema de apoyo a la decisión, no diagnóstico.</b> Confirmar hallazgos por método ortogonal e interpretar en el contexto clínico completo.</div>
+<footer>raredx · priorización dirigida por fenotipo · Ensembl · gnomAD · ClinVar · Open Targets · HPO/OLS4</footer>
+</div></body></html>
