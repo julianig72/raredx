@@ -208,6 +208,100 @@ def gene_pheno_score(ensg, patient_ids, patient_full):
     score=(len(direct)*1.0+(len(matched)-len(direct))*0.4)/max(len(patient_ids),1)
     return round(min(score,1.0),3), len(direct), len(matched), (best[0] if best else ""), ("; ".join(best[2]) if best else "")
 
+
+# ---------- AI module A: ESM-2 missense pathogenicity (optional) ----------
+_ESM_CACHE = {}
+def esm_score_missense(seq, pos1, wt_aa, mut_aa, model_name="esm2_t6_8M_UR50D", window=511):
+    """Masked-marginal log-likelihood ratio log P(mut)/P(wt) from ESM-2.
+    Negative => mutation less likely than WT under the protein LM (deleterious).
+    Requires: pip install torch fair-esm  (weights auto-download on first use).
+    Returns None if esm/torch unavailable or WT residue mismatches."""
+    try:
+        import torch, esm
+    except ImportError:
+        return None
+    if not seq or not (1 <= pos1 <= len(seq)) or seq[pos1-1] != wt_aa:
+        return None
+    if model_name not in _ESM_CACHE:
+        model, alphabet = getattr(esm.pretrained, model_name)()
+        _ESM_CACHE[model_name] = (model.eval(), alphabet, alphabet.get_batch_converter())
+    model, alphabet, bc = _ESM_CACHE[model_name]
+    half = window // 2
+    start = max(0, pos1-1-half); end = min(len(seq), start+window); start = max(0, end-window)
+    sub = seq[start:end]; rel = pos1-1-start
+    toks = bc([("v", sub)])[2]; mask_i = rel+1
+    toks_m = toks.clone(); toks_m[0, mask_i] = alphabet.mask_idx
+    import torch as _t
+    with _t.no_grad():
+        logits = model(toks_m)["logits"][0, mask_i]
+    lp = _t.log_softmax(logits, dim=-1)
+    return round(float(lp[alphabet.get_idx(mut_aa)] - lp[alphabet.get_idx(wt_aa)]), 3)
+
+def esm_call(llr, del_thr=-3.0, tol_thr=-0.5):
+    if llr is None: return ""
+    return "deleterious" if llr <= del_thr else ("tolerated" if llr >= tol_thr else "ambiguous")
+
+def protein_context(rsid, chrom, pos, ref, alt):
+    """Get protein sequence + AA position for a missense variant via Ensembl VEP + sequence."""
+    ident = rsid if rsid else f"{chrom}:{pos}-{pos+len(ref)-1}/{alt}"
+    route = "id" if rsid else "region"
+    url = f"{ENSEMBL}/vep/human/{route}/{ident}" if rsid else f"{ENSEMBL}/vep/human/region/{chrom}:{pos}-{pos+len(ref)-1}/{alt}"
+    j = _get(url, params={"content-type":"application/json"})
+    if not j: return None
+    tcs = j[0].get("transcript_consequences") or []
+    cand = [t for t in tcs if t.get("amino_acids") and "/" in t.get("amino_acids","") and t.get("protein_start")]
+    if not cand: return None
+    t = sorted(cand, key=lambda x:(-int(x.get("canonical",0) or 0),))[0]
+    wt, mut = t["amino_acids"].split("/")
+    pid = t.get("protein_id") or t["transcript_id"]
+    s = _get(f"{ENSEMBL}/sequence/id/{pid}", params={"type":"protein","content-type":"application/json"})
+    seq = (s or {}).get("seq")
+    if not seq: return None
+    return {"seq":seq, "pos":t["protein_start"], "wt":wt, "mut":mut, "protein_change":f"{wt}{t['protein_start']}{mut}"}
+
+
+# ---------- AI module B: extract HPO terms from a free-text clinical note ----------
+def extract_hpo_from_note(note_text, api_key=None):
+    """Use an LLM to extract present phenotypes from a clinical note, then ground each
+    to an official HPO ID via OLS4. Requires ANTHROPIC_API_KEY (env or arg) and the
+    `anthropic` package (pip install anthropic). Returns [{hpo_id,label,note_evidence}]."""
+    import os
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        print("[raredx] --clinical-note needs ANTHROPIC_API_KEY (or use --hpo directly)", file=sys.stderr)
+        return []
+    try:
+        import anthropic
+    except ImportError:
+        print("[raredx] pip install anthropic to use --clinical-note", file=sys.stderr)
+        return []
+    client = anthropic.Anthropic(api_key=key)
+    sys_p = ("You extract phenotypic abnormalities from a clinical note and normalize each to a "
+             "concise English HPO-style phrase. Extract ONLY explicitly present abnormal phenotypes "
+             "(not negated/absent findings, not family history, not treatments). Return STRICT JSON.")
+    user_p = (f"Clinical note:\n{note_text}\n\nReturn JSON: "
+              '{"phenotypes":[{"note_evidence":"quote","hpo_phrase":"English phenotype term"}]}')
+    msg = client.messages.create(model="claude-sonnet-4-5", max_tokens=1500,
+                                 system=sys_p, messages=[{"role":"user","content":user_p}])
+    txt = re.sub(r"^```[a-z]*|```$", "", msg.content[0].text.strip(), flags=re.M).strip()
+    try:
+        phenos = json.loads(txt).get("phenotypes", [])
+    except json.JSONDecodeError:
+        return []
+    # ground each phrase to an HPO ID via OLS4
+    seen=set(); out=[]
+    for p in phenos:
+        phrase = p.get("hpo_phrase","")
+        for q in [phrase] + ([] if phrase else []):
+            j = _get(f"{OLS}/search", params={"q":q,"ontology":"hp","rows":3})
+            docs = (((j or {}).get("response") or {}).get("docs")) or []
+            pick = next((d for d in docs if d.get("label","").lower()==q.lower()), docs[0] if docs else None)
+            if pick and pick["obo_id"] not in seen:
+                seen.add(pick["obo_id"])
+                out.append({"hpo_id":pick["obo_id"],"label":pick["label"],"note_evidence":p.get("note_evidence","")})
+                break
+    return out
+
 # ---------- report ----------
 def write_html(variants, patient_hpo, prefix):
     TC={"Pathogenic":"#c0392b","Likely pathogenic":"#e67e22","Uncertain significance (VUS)":"#7f8c8d",
@@ -248,16 +342,27 @@ def main():
     ap.add_argument("--hpo", default="", help="Comma-separated HPO IDs or free-text terms, or @file.txt")
     ap.add_argument("--out-prefix", default="raredx_out")
     ap.add_argument("--email", default=None, help="Contact email for NCBI E-utilities (optional)")
+    ap.add_argument("--esm", action="store_true", help="Score missense with ESM-2 (needs torch+fair-esm)")
+    ap.add_argument("--clinical-note", default=None, help="Path to free-text clinical note; extracts HPO via LLM (needs ANTHROPIC_API_KEY)")
+    ap.add_argument("--anthropic-key", default=None, help="Anthropic API key (else uses ANTHROPIC_API_KEY env)")
     a=ap.parse_args()
 
     variants=parse_vcf(a.vcf)
     print(f"[raredx] parsed {len(variants)} variants", file=sys.stderr)
 
-    # patient HPO profile
+    # patient HPO profile — from clinical note (LLM) and/or explicit --hpo
+    patient_hpo=[]
+    if a.clinical_note:
+        note=open(a.clinical_note).read()
+        patient_hpo=extract_hpo_from_note(note, a.anthropic_key)
+        print(f"[raredx] extracted {len(patient_hpo)} HPO terms from clinical note", file=sys.stderr)
     hpo_arg=a.hpo
     if hpo_arg.startswith("@"): hpo_arg=open(hpo_arg[1:]).read()
     tokens=[t for t in re.split(r"[,\n]", hpo_arg) if t.strip()]
-    patient_hpo=resolve_hpo(tokens) if tokens else []
+    if tokens:
+        existing={t["hpo_id"] for t in patient_hpo}
+        for t in resolve_hpo(tokens):
+            if t["hpo_id"] not in existing: patient_hpo.append(t); existing.add(t["hpo_id"])
     patient_ids={t["hpo_id"] for t in patient_hpo}
     patient_full=expand_hpo(patient_ids) if patient_ids else set()
     if patient_hpo: print(f"[raredx] resolved {len(patient_ids)} HPO terms, expanded to {len(patient_full)}", file=sys.stderr)
@@ -272,7 +377,18 @@ def main():
         v["pli"],v["loeuf"]=con.get("pli"),con.get("loeuf")
         cv=clinvar(v, a.email); v.update(clinvar=cv.get("significance"), stars=cv.get("stars"),
                                          conditions=cv.get("conditions"), protein=v.get("protein") or cv.get("protein_change"))
+        # ESM-2 missense scoring (optional)
+        v["esm2_llr"]=None; v["esm2_call"]=""
+        if a.esm and v["consequence"]=="missense_variant":
+            ctx=protein_context(v.get("rsid"), v["chrom"], v["pos"], v["ref"], v["alt"])
+            if ctx:
+                v["esm2_llr"]=esm_score_missense(ctx["seq"], ctx["pos"], ctx["wt"], ctx["mut"])
+                v["esm2_call"]=esm_call(v["esm2_llr"])
+                v["protein"]=v.get("protein") or ctx["protein_change"]
         call,tags=classify(v["af"],v["consequence"],v["pli"],v["loeuf"],v["clinvar"],v["stars"],v["sift"],v["polyphen"])
+        # fold ESM signal into ACMG tags
+        if v["esm2_call"]=="deleterious": tags.append(("PP3_ESM",f"ESM-2 LLR {v['esm2_llr']} (deleterious)"))
+        elif v["esm2_call"]=="tolerated": tags.append(("BP4_ESM",f"ESM-2 LLR {v['esm2_llr']} (tolerated)"))
         v["call"]=call; v["acmg_tags"]=",".join(t[0] for t in tags); v["evidence"]="; ".join(f"{t[0]}: {t[1]}" for t in tags)
         # variant score
         codes={t[0] for t in tags}; s=0
@@ -292,7 +408,10 @@ def main():
     # normalize variant score, combine
     raws=[v["_raw"] for v in variants]; lo,hi=min(raws),max(raws)
     for v in variants:
-        v["variant_score"]=round((v["_raw"]-lo)/(hi-lo),3) if hi>lo else 0.5
+        vs=round((v["_raw"]-lo)/(hi-lo),3) if hi>lo else 0.5
+        if v.get("esm2_call")=="deleterious": vs=min(vs+0.08,1.0)
+        elif v.get("esm2_call")=="tolerated": vs=max(vs-0.08,0.0)
+        v["variant_score"]=round(vs,3)
         c=0.55*v["variant_score"]+0.45*v["pheno_score"] if patient_ids else v["variant_score"]
         if v["filter"]!="PASS": c*=0.5
         v["combined"]=round(c,3)
@@ -303,7 +422,7 @@ def main():
     import csv
     cols=["rank","gene","rsid","chrom","pos","ref","alt","consequence","protein","af",
           "clinvar","stars","pli","loeuf","sift","polyphen","call","variant_score",
-          "pheno_score","pheno_direct","pheno_disease","pheno_shared","combined","filter","acmg_tags"]
+          "pheno_score","pheno_direct","pheno_disease","pheno_shared","combined","filter","acmg_tags","esm2_llr","esm2_call"]
     with open(f"{a.out_prefix}_annotated.csv","w",newline="") as fh:
         w=csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore"); w.writeheader()
         for v in variants: w.writerow(v)
