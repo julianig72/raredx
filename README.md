@@ -24,10 +24,16 @@ priorización dirigida por fenotipo al estilo de Exomiser. Soporta **GRCh38 y GR
                                         v
                      combined = 0.55*variante + 0.45*fenotipo
                                         v
+                        Ranking de variantes
+                                        v
+        [IA-4] CAPA AGÉNTICA (estilo DeepRare, opcional)
+        autorreflexión sobre candidatos (fenotipo + herencia)
+        -> diferencial de ENFERMEDADES + enlaces verificados
+                                        v
                         Ranking + informe HTML + CSV
 ```
 
-## Las tres capas de IA (novedad)
+## Las cuatro capas de IA (novedad)
 
 ### IA-1 - Extraccion de fenotipo HPO desde nota clinica (LLM)
 En vez de introducir codigos HPO a mano, **pegas la nota clinica en lenguaje natural** y un
@@ -62,6 +68,35 @@ No requiere GPU ni descargar pesos.
 ```bash
 python raredx_pipeline.py input.vcf --alphamissense --assembly GRCh37 --hpo "HP:0001250" --out-prefix out/p
 ```
+
+### IA-4 - Capa agéntica: autorreflexión + diagnóstico diferencial trazable
+Inspirada en **DeepRare** (Zhao et al., *Nature* 2025, "An agentic system for rare disease
+diagnosis with traceable reasoning"). En lugar de entregar solo una lista rankeada de variantes,
+un LLM **razona sobre su propia salida** en tres pasos:
+
+1. **Autorreflexión.** Revisa cada candidato del top-K frente al fenotipo del paciente y al
+   **patrón de herencia vs. la cigosidad observada**, emitiendo un veredicto `support`/`uncertain`/`refute`
+   con su razonamiento. Detecta incoherencias que un ranking numérico no ve — p. ej. *una variante
+   heterocigota única en un gen recesivo sin segundo golpe es un portador, no la causa*, o *una
+   llamada heterocigota ligada al X en un varón es sospechosa*. Si **todos** los candidatos se
+   descartan, amplía la ventana de búsqueda (K += paso) y reitera — el análogo fiel al bucle de
+   DeepRare que aumenta la profundidad N y vuelve a iterar.
+2. **Síntesis del diferencial.** Agrupa las variantes que sobreviven en **hipótesis a nivel de
+   enfermedad** (enfermedad, gen(es), variante(s), herencia, razonamiento) y las ordena por
+   verosimilitud.
+3. **Verificación de enlaces (anti-alucinación).** Cada cita usa solo URLs **pre-construidas de
+   forma determinista** (ClinVar, OMIM, Open Targets, Ensembl, PubMed) y se **comprueba que cada
+   enlace resuelve** antes de incluirlo — el mismo mecanismo de trazabilidad de DeepRare. El LLM
+   nunca inventa enlaces.
+
+```bash
+python raredx_pipeline.py input.vcf --agentic --alphamissense --assembly GRCh37 \
+       --hpo "HP:0001250,HP:0011097" --out-prefix out/p
+```
+
+En el caso real de epilepsia, esta capa **reordena por razonamiento clínico**: PNKP (que salía #1
+por score crudo) baja porque es recesivo con una sola variante heterocigota, y **SCN1A p.Cys1376Arg
+emerge como hipótesis principal (Dravet, alta verosimilitud)** con enlaces verificados a ClinVar/Ensembl.
 
 ## Motor de variante (ACMG-lite)
 
@@ -104,13 +139,16 @@ python raredx_pipeline.py input.vcf \
        --clinical-note nota.txt \       # IA-1: HPO desde texto (o --hpo "HP:...")
        --esm \                          # IA-2: ESM-2 en missense
        --alphamissense \                # IA-3: AlphaMissense en missense (sin GPU)
+       --agentic \                      # IA-4: autorreflexión + diferencial trazable (LLM)
        --out-prefix salida/paciente \
        --email tu@institucion.org
 ```
 
 **Dependencias:** `requests` (base); `torch fair-esm` (para `--esm`); `anthropic` +
-`ANTHROPIC_API_KEY` (para `--clinical-note`). `--alphamissense` **no requiere dependencias
-extra ni GPU** (usa scores precalculados vía Ensembl VEP). Sin GPU, ESM-2 usa el modelo 8M en CPU.
+`ANTHROPIC_API_KEY` (para `--clinical-note` y `--agentic`). `--alphamissense` **no requiere
+dependencias extra ni GPU** (usa scores precalculados vía Ensembl VEP). Sin GPU, ESM-2 usa el
+modelo 8M en CPU. La capa `--agentic` degrada con elegancia: si no hay LLM disponible, el análisis
+se completa igual y el diferencial queda vacío.
 
 ## Salidas
 - `<prefix>_report.html` - informe clinico: nota->HPO, ranking con LLR de ESM-2, fichas de evidencia
