@@ -76,11 +76,16 @@ def parse_vcf(path):
     return out
 
 # ---------- annotation ----------
-def vep(rec):
-    """Ensembl VEP by region+allele (works without an rsID)."""
+def vep(rec, assembly="GRCh38"):
+    """Ensembl VEP by region+allele (works without an rsID). Assembly-aware: for GRCh37 it
+    uses the GRCh37 REST endpoint and also harvests gnomAD AF from colocated_variants, since
+    the GraphQL gnomAD API (gnomad_af) is GRCh38-only and would silently miss GRCh37 coords."""
+    base = ENSEMBL if assembly == "GRCh38" else ENSEMBL_GRCH37
     reg=f'{rec["chrom"]}:{rec["pos"]}-{rec["pos"]+len(rec["ref"])-1}'
-    url=f'{ENSEMBL}/vep/human/region/{reg}/{rec["alt"]}'
-    j=_get(url, params={"content-type":"application/json"})
+    url=f'{base}/vep/human/region/{reg}/{rec["alt"]}'
+    params={"content-type":"application/json"}
+    if assembly=="GRCh37": params.update({"AF_gnomade":1,"AF_gnomadg":1,"sift":1,"polyphen":1})
+    j=_get(url, params=params)
     if not j: return {}
     r=j[0]
     tcs=r.get("transcript_consequences") or []
@@ -92,8 +97,16 @@ def vep(rec):
         if t.get("sift_prediction") and not sift: sift=t["sift_prediction"]
         if t.get("polyphen_prediction") and not poly: poly=t["polyphen_prediction"]
         if t.get("amino_acids") and not aa: aa=t["amino_acids"]
+    # gnomAD AF from colocated frequencies (populated on the GRCh37 endpoint)
+    gaf=None
+    for cv in (r.get("colocated_variants") or []):
+        fr=cv.get("frequencies")
+        if fr:
+            for _al,d in fr.items():
+                for k in ("gnomade","gnomadg","gnomad"):
+                    if d.get(k) is not None and gaf is None: gaf=d[k]
     return dict(most_severe=r.get("most_severe_consequence"),gene=gene,gene_id=gid,
-                amino_acids=aa,sift=sift,polyphen=poly,
+                amino_acids=aa,sift=sift,polyphen=poly,gnomad_af=gaf,
                 colocated=[c.get("id") for c in (r.get("colocated_variants") or []) if str(c.get("id","")).startswith("rs")])
 
 GNOMAD_VAR_Q="""query($vid:String!,$ds:DatasetId!){
@@ -241,6 +254,51 @@ def esm_call(llr, del_thr=-3.0, tol_thr=-0.5):
     if llr is None: return ""
     return "deleterious" if llr <= del_thr else ("tolerated" if llr >= tol_thr else "ambiguous")
 
+
+# ---------- AI module C: AlphaMissense pathogenicity (precomputed, via Ensembl VEP) ----------
+# AlphaMissense (Cheng et al. 2023, Science) is NOT executable — DeepMind released only
+# precomputed pathogenicity scores for ~71M human missense variants under a non-commercial
+# licence. Ensembl VEP serves them (flag AlphaMissense=1). Scores are GRCh38-only, so a
+# GRCh37 variant is lifted over to GRCh38 first.
+ENSEMBL_GRCH37 = "https://grch37.rest.ensembl.org"
+
+def liftover_37_to_38(chrom, pos):
+    """Map a GRCh37 position to GRCh38 via the Ensembl assembly-mapping REST endpoint."""
+    c = str(chrom).replace("chr", "")
+    j = _get(f"{ENSEMBL_GRCH37}/map/human/GRCh37/{c}:{pos}..{pos}/GRCh38")
+    if not j:
+        return None
+    mp = j.get("mappings") or []
+    return mp[0]["mapped"]["start"] if mp else None
+
+def alphamissense_score(chrom, pos, ref, alt, assembly="GRCh38", gene=None):
+    """Return {'am_pathogenicity': float, 'am_class': str} for a missense variant, or None.
+    Queries Ensembl VEP GRCh38 with AlphaMissense=1. If the input is GRCh37, lifts over first."""
+    c = str(chrom).replace("chr", "")
+    pos38 = pos if assembly == "GRCh38" else liftover_37_to_38(c, pos)
+    if not pos38:
+        return None
+    j = _get(f"{ENSEMBL}/vep/human/region/{c}:{pos38}-{pos38}/{alt}", params={"AlphaMissense": 1})
+    if not j:
+        return None
+    tcs = j[0].get("transcript_consequences") or []
+    # prefer the transcript for the annotated gene, else any transcript carrying an AM score
+    withscore = [t for t in tcs if t.get("alphamissense")]
+    if not withscore:
+        return None
+    same = [t for t in withscore if gene and t.get("gene_symbol") == gene]
+    t = (same or withscore)[0]
+    am = t["alphamissense"]
+    return {"am_pathogenicity": am.get("am_pathogenicity"), "am_class": am.get("am_class")}
+
+def am_call(am):
+    """Normalize AlphaMissense class to the pipeline's deleterious/tolerated/ambiguous vocabulary."""
+    if not am or am.get("am_class") is None:
+        return ""
+    cls = am["am_class"]
+    return {"likely_pathogenic": "deleterious", "likely_benign": "tolerated",
+            "ambiguous": "ambiguous"}.get(cls, "ambiguous")
+
 def protein_context(rsid, chrom, pos, ref, alt, gene=None):
     """Get protein sequence + AA position for a missense variant via Ensembl VEP + sequence.
     Always queries by REGION+ALLELE (not rsID): an rsID can carry several alt alleles, and the
@@ -347,6 +405,8 @@ def main():
     ap.add_argument("--out-prefix", default="raredx_out")
     ap.add_argument("--email", default=None, help="Contact email for NCBI E-utilities (optional)")
     ap.add_argument("--esm", action="store_true", help="Score missense with ESM-2 (needs torch+fair-esm)")
+    ap.add_argument("--alphamissense", action="store_true", help="Score missense with AlphaMissense (precomputed, via Ensembl VEP; no GPU)")
+    ap.add_argument("--assembly", default="GRCh38", choices=["GRCh38","GRCh37"], help="Genome build of the input VCF (AlphaMissense lifts GRCh37->GRCh38)")
     ap.add_argument("--clinical-note", default=None, help="Path to free-text clinical note; extracts HPO via LLM (needs ANTHROPIC_API_KEY)")
     ap.add_argument("--anthropic-key", default=None, help="Anthropic API key (else uses ANTHROPIC_API_KEY env)")
     a=ap.parse_args()
@@ -373,10 +433,11 @@ def main():
 
     cons_cache={}
     for i,v in enumerate(variants,1):
-        ve=vep(v); v.update(consequence=ve.get("most_severe"), gene=ve.get("gene"),
+        ve=vep(v, a.assembly); v.update(consequence=ve.get("most_severe"), gene=ve.get("gene"),
                             gene_id=ve.get("gene_id"), protein=ve.get("amino_acids"),
                             sift=ve.get("sift"), polyphen=ve.get("polyphen"))
-        v["af"]=gnomad_af(v)
+        # gnomAD AF: GraphQL r4 for GRCh38; for GRCh37 use the AF harvested from VEP colocated freqs
+        v["af"]=gnomad_af(v) if a.assembly=="GRCh38" else ve.get("gnomad_af")
         con=gnomad_constraint(v["gene"], cons_cache) if v.get("gene") else {"pli":None,"loeuf":None}
         v["pli"],v["loeuf"]=con.get("pli"),con.get("loeuf")
         cv=clinvar(v, a.email); v.update(clinvar=cv.get("significance"), stars=cv.get("stars"),
@@ -389,10 +450,19 @@ def main():
                 v["esm2_llr"]=esm_score_missense(ctx["seq"], ctx["pos"], ctx["wt"], ctx["mut"])
                 v["esm2_call"]=esm_call(v["esm2_llr"])
                 v["protein"]=v.get("protein") or ctx["protein_change"]
+        # AlphaMissense missense scoring (optional; precomputed via VEP, lifts GRCh37->GRCh38)
+        v["am_pathogenicity"]=None; v["am_call"]=""
+        if a.alphamissense and v["consequence"]=="missense_variant":
+            am=alphamissense_score(v["chrom"], v["pos"], v["ref"], v["alt"], assembly=a.assembly, gene=v.get("gene"))
+            if am:
+                v["am_pathogenicity"]=am["am_pathogenicity"]; v["am_call"]=am_call(am)
         call,tags=classify(v["af"],v["consequence"],v["pli"],v["loeuf"],v["clinvar"],v["stars"],v["sift"],v["polyphen"])
         # fold ESM signal into ACMG tags
         if v["esm2_call"]=="deleterious": tags.append(("PP3_ESM",f"ESM-2 LLR {v['esm2_llr']} (deleterious)"))
         elif v["esm2_call"]=="tolerated": tags.append(("BP4_ESM",f"ESM-2 LLR {v['esm2_llr']} (tolerated)"))
+        # fold AlphaMissense signal into ACMG tags (PP3/BP4 in silico evidence)
+        if v["am_call"]=="deleterious": tags.append(("PP3_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_pathogenic)"))
+        elif v["am_call"]=="tolerated": tags.append(("BP4_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_benign)"))
         v["call"]=call; v["acmg_tags"]=",".join(t[0] for t in tags); v["evidence"]="; ".join(f"{t[0]}: {t[1]}" for t in tags)
         # variant score
         codes={t[0] for t in tags}; s=0
@@ -415,6 +485,9 @@ def main():
         vs=round((v["_raw"]-lo)/(hi-lo),3) if hi>lo else 0.5
         if v.get("esm2_call")=="deleterious": vs=min(vs+0.08,1.0)
         elif v.get("esm2_call")=="tolerated": vs=max(vs-0.08,0.0)
+        # AlphaMissense weighted slightly higher than ESM-2 8M (clinically calibrated predictor)
+        if v.get("am_call")=="deleterious": vs=min(vs+0.10,1.0)
+        elif v.get("am_call")=="tolerated": vs=max(vs-0.10,0.0)
         v["variant_score"]=round(vs,3)
         c=0.55*v["variant_score"]+0.45*v["pheno_score"] if patient_ids else v["variant_score"]
         if v["filter"]!="PASS": c*=0.5
@@ -426,7 +499,7 @@ def main():
     import csv
     cols=["rank","gene","rsid","chrom","pos","ref","alt","consequence","protein","af",
           "clinvar","stars","pli","loeuf","sift","polyphen","call","variant_score",
-          "pheno_score","pheno_direct","pheno_disease","pheno_shared","combined","filter","acmg_tags","esm2_llr","esm2_call"]
+          "pheno_score","pheno_direct","pheno_disease","pheno_shared","combined","filter","acmg_tags","esm2_llr","esm2_call","am_pathogenicity","am_call"]
     with open(f"{a.out_prefix}_annotated.csv","w",newline="") as fh:
         w=csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore"); w.writeheader()
         for v in variants: w.writerow(v)
