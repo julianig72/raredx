@@ -365,16 +365,29 @@ def extract_hpo_from_note(note_text, api_key=None):
     return out
 
 # ---------- report ----------
-def write_html(variants, patient_hpo, prefix):
+def write_html(variants, patient_hpo, prefix, assembly="GRCh38"):
     TC={"Pathogenic":"#c0392b","Likely pathogenic":"#e67e22","Uncertain significance (VUS)":"#7f8c8d",
         "Likely benign":"#27ae60","Benign":"#2ecc71"}
     tier=lambda c:"Benign" if c.split(" |")[0].startswith("Benign") else c.split(" |")[0]
     col=lambda c:TC.get(tier(c),"#7f8c8d")
     faf=lambda a:"absent" if a is None else (f"{a:.2e}" if a<1e-3 else f"{a:.3f}")
+    def ai_cell(v):
+        # AlphaMissense pathogenicity (0-1) and/or ESM-2 LLR, whichever were computed
+        parts=[]
+        am=v.get("am_pathogenicity")
+        if am is not None:
+            amc="#c0392b" if float(am)>=0.564 else ("#27ae60" if float(am)<=0.34 else "#7f8c8d")
+            parts.append(f'<span style="color:{amc};font-weight:600" title="AlphaMissense">AM {float(am):.2f}</span>')
+        llr=v.get("esm2_llr")
+        if llr is not None:
+            ec="#c0392b" if float(llr)<=-3 else ("#27ae60" if float(llr)>=-0.5 else "#7f8c8d")
+            parts.append(f'<span style="color:{ec}" title="ESM-2 LLR">ESM {float(llr):.1f}</span>')
+        return " ".join(parts) or "—"
     chips="".join(f'<span class="hpo">{html.escape(t["label"])} <code>{t["hpo_id"]}</code></span>' for t in patient_hpo)
     rows="".join(f'<tr><td>{v["rank"]}</td><td><b>{html.escape(v.get("gene") or "")}</b></td>'
                  f'<td>{v["chrom"]}:{v["pos"]} {html.escape(v["ref"])}>{html.escape(v["alt"])}</td>'
                  f'<td>{faf(v.get("af"))}</td><td>{html.escape(str(v.get("clinvar") or ""))} {"*"*int(v.get("stars") or 0)}</td>'
+                 f'<td>{ai_cell(v)}</td>'
                  f'<td style="color:{col(v["call"])};font-weight:600">{html.escape(tier(v["call"]))}</td>'
                  f'<td>{v.get("variant_score",0):.2f}</td><td style="color:#8e44ad">{v.get("pheno_score",0):.2f}</td>'
                  f'<td><b>{v.get("combined",0):.2f}</b></td><td>{v.get("filter")}</td></tr>' for v in variants)
@@ -388,15 +401,128 @@ table{{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;ov
 th{{background:#eef1f5;text-align:left;padding:8px;font-size:10.5px;text-transform:uppercase;color:#7f8c8d}}
 td{{padding:7px 8px;border-top:1px solid #eef1f5}} .note{{background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:12px 16px;font-size:12px;color:#795548;margin-top:20px}}</style></head><body>
 <header><h1>raredx - Informe genomico priorizado por fenotipo</h1>
-<div style="color:#9fb3c8;font-size:12px">GRCh38 | {len(variants)} variantes | {now}</div></header>
+<div style="color:#9fb3c8;font-size:12px">{assembly} | {len(variants)} variantes | {now}</div></header>
 <div class="hpobar"><b>Perfil HPO del paciente ({len(patient_hpo)}):</b><br>{chips or "(ninguno - solo ranking por variante)"}</div>
-<table><thead><tr><th>#</th><th>Gen</th><th>Variante</th><th>gnomAD</th><th>ClinVar</th><th>Clase</th><th>Var</th><th>Feno</th><th>Comb</th><th>QC</th></tr></thead>
+<table><thead><tr><th>#</th><th>Gen</th><th>Variante</th><th>gnomAD</th><th>ClinVar</th><th>IA</th><th>Clase</th><th>Var</th><th>Feno</th><th>Comb</th><th>QC</th></tr></thead>
 <tbody>{rows}</tbody></table>
 <div class="note"><b>Sistema de apoyo a la decision, no diagnostico.</b> VEP + gnomAD + ClinVar (score de variante ACMG-lite) x fenotipos HPO de Open Targets (score fenotipico). Confirmar por metodo ortogonal e interpretar en contexto clinico.</div>
 </body></html>"""
     open(f"{prefix}_report.html","w").write(doc)
 
 # ---------- main ----------
+CSV_COLS=["rank","gene","rsid","chrom","pos","ref","alt","consequence","protein","af",
+          "clinvar","stars","pli","loeuf","sift","polyphen","call","variant_score",
+          "pheno_score","pheno_direct","pheno_disease","pheno_shared","combined","filter",
+          "acmg_tags","esm2_llr","esm2_call","am_pathogenicity","am_call"]
+
+def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, assembly="GRCh38",
+                 use_esm=False, use_am=False, email=None, anthropic_key=None, progress=None):
+    """Annotate a VCF and prioritize variants. Reusable entry point for CLI and web server.
+
+    Args:
+        vcf_path: path to the input VCF.
+        sample: sample id (label only).
+        hpo: comma/newline-separated HPO IDs or free-text terms.
+        clinical_note_text: raw clinical-note text (LLM -> HPO), or None.
+        assembly: 'GRCh38' or 'GRCh37' (GRCh37 lifts over to GRCh38 for AlphaMissense).
+        use_esm / use_am: enable the ESM-2 / AlphaMissense missense layers.
+        email: contact email for NCBI E-utilities.
+        anthropic_key: key for the clinical-note LLM layer (else ANTHROPIC_API_KEY env).
+        progress: optional callable(done:int, total:int, message:str) for live status.
+
+    Returns dict: {variants, patient_hpo, csv_cols, n_input}. Pass the result to
+    write_outputs(result, prefix) to emit <prefix>_annotated.csv and <prefix>_report.html.
+    """
+    def _prog(done, total, msg):
+        if progress:
+            try: progress(done, total, msg)
+            except Exception: pass
+
+    variants=parse_vcf(vcf_path)
+    _prog(0, len(variants), f"VCF leído: {len(variants)} variantes")
+
+    # patient HPO profile — from clinical note (LLM) and/or explicit hpo string
+    patient_hpo=[]
+    if clinical_note_text:
+        patient_hpo=extract_hpo_from_note(clinical_note_text, anthropic_key)
+        _prog(0, len(variants), f"{len(patient_hpo)} fenotipos extraídos de la nota clínica")
+    tokens=[t for t in re.split(r"[,\n]", hpo or "") if t.strip()]
+    if tokens:
+        existing={t["hpo_id"] for t in patient_hpo}
+        for t in resolve_hpo(tokens):
+            if t["hpo_id"] not in existing: patient_hpo.append(t); existing.add(t["hpo_id"])
+    patient_ids={t["hpo_id"] for t in patient_hpo}
+    patient_full=expand_hpo(patient_ids) if patient_ids else set()
+    if patient_hpo: _prog(0, len(variants), f"{len(patient_ids)} términos HPO (expandidos a {len(patient_full)})")
+
+    cons_cache={}
+    for i,v in enumerate(variants,1):
+        ve=vep(v, assembly); v.update(consequence=ve.get("most_severe"), gene=ve.get("gene"),
+                            gene_id=ve.get("gene_id"), protein=ve.get("amino_acids"),
+                            sift=ve.get("sift"), polyphen=ve.get("polyphen"))
+        v["af"]=gnomad_af(v) if assembly=="GRCh38" else ve.get("gnomad_af")
+        con=gnomad_constraint(v["gene"], cons_cache) if v.get("gene") else {"pli":None,"loeuf":None}
+        v["pli"],v["loeuf"]=con.get("pli"),con.get("loeuf")
+        cv=clinvar(v, email); v.update(clinvar=cv.get("significance"), stars=cv.get("stars"),
+                                       conditions=cv.get("conditions"), protein=v.get("protein") or cv.get("protein_change"))
+        v["esm2_llr"]=None; v["esm2_call"]=""
+        if use_esm and v["consequence"]=="missense_variant":
+            ctx=protein_context(v.get("rsid"), v["chrom"], v["pos"], v["ref"], v["alt"], v.get("gene"))
+            if ctx:
+                v["esm2_llr"]=esm_score_missense(ctx["seq"], ctx["pos"], ctx["wt"], ctx["mut"])
+                v["esm2_call"]=esm_call(v["esm2_llr"])
+                v["protein"]=v.get("protein") or ctx["protein_change"]
+        v["am_pathogenicity"]=None; v["am_call"]=""
+        if use_am and v["consequence"]=="missense_variant":
+            am=alphamissense_score(v["chrom"], v["pos"], v["ref"], v["alt"], assembly=assembly, gene=v.get("gene"))
+            if am:
+                v["am_pathogenicity"]=am["am_pathogenicity"]; v["am_call"]=am_call(am)
+        call,tags=classify(v["af"],v["consequence"],v["pli"],v["loeuf"],v["clinvar"],v["stars"],v["sift"],v["polyphen"])
+        if v["esm2_call"]=="deleterious": tags.append(("PP3_ESM",f"ESM-2 LLR {v['esm2_llr']} (deleterious)"))
+        elif v["esm2_call"]=="tolerated": tags.append(("BP4_ESM",f"ESM-2 LLR {v['esm2_llr']} (tolerated)"))
+        if v["am_call"]=="deleterious": tags.append(("PP3_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_pathogenic)"))
+        elif v["am_call"]=="tolerated": tags.append(("BP4_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_benign)"))
+        v["call"]=call; v["acmg_tags"]=",".join(t[0] for t in tags); v["evidence"]="; ".join(f"{t[0]}: {t[1]}" for t in tags)
+        codes={t[0] for t in tags}; s=0
+        s+=50*len({"PVS1","PS_ClinVar"}&codes)+20*len({"PM2","PP3","PP5_ClinVar","PVS1_mod"}&codes)
+        s-=40*len({"BA1","BS_ClinVar"}&codes)+15*len({"BS1","BP4","BP6_ClinVar"}&codes)
+        if call.split(" |")[0]=="Pathogenic": s+=30
+        if v["filter"]!="PASS": s-=25
+        v["_raw"]=s
+        if patient_ids:
+            ps,pd_,pm_,pdis,psh=gene_pheno_score(v.get("gene_id"),patient_ids,patient_full)
+            v.update(pheno_score=ps,pheno_direct=pd_,pheno_matched=pm_,pheno_disease=pdis,pheno_shared=psh)
+        else:
+            v.update(pheno_score=0.0,pheno_direct=0,pheno_matched=0,pheno_disease="",pheno_shared="")
+        if i % 10 == 0 or i == len(variants):
+            _prog(i, len(variants), f"Anotando variantes: {i}/{len(variants)}")
+
+    raws=[v["_raw"] for v in variants] or [0]; lo,hi=min(raws),max(raws)
+    for v in variants:
+        vs=round((v["_raw"]-lo)/(hi-lo),3) if hi>lo else 0.5
+        if v.get("esm2_call")=="deleterious": vs=min(vs+0.08,1.0)
+        elif v.get("esm2_call")=="tolerated": vs=max(vs-0.08,0.0)
+        if v.get("am_call")=="deleterious": vs=min(vs+0.10,1.0)
+        elif v.get("am_call")=="tolerated": vs=max(vs-0.10,0.0)
+        v["variant_score"]=round(vs,3)
+        c=0.55*v["variant_score"]+0.45*v["pheno_score"] if patient_ids else v["variant_score"]
+        if v["filter"]!="PASS": c*=0.5
+        v["combined"]=round(c,3)
+    variants.sort(key=lambda v:-v["combined"])
+    for i,v in enumerate(variants,1): v["rank"]=i
+    _prog(len(variants), len(variants), "Priorización completa")
+
+    return {"variants":variants, "patient_hpo":patient_hpo, "csv_cols":CSV_COLS,
+            "n_input":len(variants), "assembly":assembly}
+
+def write_outputs(result, out_prefix):
+    """Write <prefix>_annotated.csv and <prefix>_report.html from a run_pipeline() result."""
+    import csv
+    with open(f"{out_prefix}_annotated.csv","w",newline="") as fh:
+        w=csv.DictWriter(fh, fieldnames=result["csv_cols"], extrasaction="ignore"); w.writeheader()
+        for v in result["variants"]: w.writerow(v)
+    write_html(result["variants"], result["patient_hpo"], out_prefix, result.get("assembly","GRCh38"))
+
 def main():
     ap=argparse.ArgumentParser(description="raredx VCF annotation & phenotype prioritization")
     ap.add_argument("vcf")
@@ -411,99 +537,15 @@ def main():
     ap.add_argument("--anthropic-key", default=None, help="Anthropic API key (else uses ANTHROPIC_API_KEY env)")
     a=ap.parse_args()
 
-    variants=parse_vcf(a.vcf)
-    print(f"[raredx] parsed {len(variants)} variants", file=sys.stderr)
-
-    # patient HPO profile — from clinical note (LLM) and/or explicit --hpo
-    patient_hpo=[]
-    if a.clinical_note:
-        note=open(a.clinical_note).read()
-        patient_hpo=extract_hpo_from_note(note, a.anthropic_key)
-        print(f"[raredx] extracted {len(patient_hpo)} HPO terms from clinical note", file=sys.stderr)
     hpo_arg=a.hpo
     if hpo_arg.startswith("@"): hpo_arg=open(hpo_arg[1:]).read()
-    tokens=[t for t in re.split(r"[,\n]", hpo_arg) if t.strip()]
-    if tokens:
-        existing={t["hpo_id"] for t in patient_hpo}
-        for t in resolve_hpo(tokens):
-            if t["hpo_id"] not in existing: patient_hpo.append(t); existing.add(t["hpo_id"])
-    patient_ids={t["hpo_id"] for t in patient_hpo}
-    patient_full=expand_hpo(patient_ids) if patient_ids else set()
-    if patient_hpo: print(f"[raredx] resolved {len(patient_ids)} HPO terms, expanded to {len(patient_full)}", file=sys.stderr)
+    note=open(a.clinical_note).read() if a.clinical_note else None
 
-    cons_cache={}
-    for i,v in enumerate(variants,1):
-        ve=vep(v, a.assembly); v.update(consequence=ve.get("most_severe"), gene=ve.get("gene"),
-                            gene_id=ve.get("gene_id"), protein=ve.get("amino_acids"),
-                            sift=ve.get("sift"), polyphen=ve.get("polyphen"))
-        # gnomAD AF: GraphQL r4 for GRCh38; for GRCh37 use the AF harvested from VEP colocated freqs
-        v["af"]=gnomad_af(v) if a.assembly=="GRCh38" else ve.get("gnomad_af")
-        con=gnomad_constraint(v["gene"], cons_cache) if v.get("gene") else {"pli":None,"loeuf":None}
-        v["pli"],v["loeuf"]=con.get("pli"),con.get("loeuf")
-        cv=clinvar(v, a.email); v.update(clinvar=cv.get("significance"), stars=cv.get("stars"),
-                                         conditions=cv.get("conditions"), protein=v.get("protein") or cv.get("protein_change"))
-        # ESM-2 missense scoring (optional)
-        v["esm2_llr"]=None; v["esm2_call"]=""
-        if a.esm and v["consequence"]=="missense_variant":
-            ctx=protein_context(v.get("rsid"), v["chrom"], v["pos"], v["ref"], v["alt"], v.get("gene"))
-            if ctx:
-                v["esm2_llr"]=esm_score_missense(ctx["seq"], ctx["pos"], ctx["wt"], ctx["mut"])
-                v["esm2_call"]=esm_call(v["esm2_llr"])
-                v["protein"]=v.get("protein") or ctx["protein_change"]
-        # AlphaMissense missense scoring (optional; precomputed via VEP, lifts GRCh37->GRCh38)
-        v["am_pathogenicity"]=None; v["am_call"]=""
-        if a.alphamissense and v["consequence"]=="missense_variant":
-            am=alphamissense_score(v["chrom"], v["pos"], v["ref"], v["alt"], assembly=a.assembly, gene=v.get("gene"))
-            if am:
-                v["am_pathogenicity"]=am["am_pathogenicity"]; v["am_call"]=am_call(am)
-        call,tags=classify(v["af"],v["consequence"],v["pli"],v["loeuf"],v["clinvar"],v["stars"],v["sift"],v["polyphen"])
-        # fold ESM signal into ACMG tags
-        if v["esm2_call"]=="deleterious": tags.append(("PP3_ESM",f"ESM-2 LLR {v['esm2_llr']} (deleterious)"))
-        elif v["esm2_call"]=="tolerated": tags.append(("BP4_ESM",f"ESM-2 LLR {v['esm2_llr']} (tolerated)"))
-        # fold AlphaMissense signal into ACMG tags (PP3/BP4 in silico evidence)
-        if v["am_call"]=="deleterious": tags.append(("PP3_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_pathogenic)"))
-        elif v["am_call"]=="tolerated": tags.append(("BP4_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_benign)"))
-        v["call"]=call; v["acmg_tags"]=",".join(t[0] for t in tags); v["evidence"]="; ".join(f"{t[0]}: {t[1]}" for t in tags)
-        # variant score
-        codes={t[0] for t in tags}; s=0
-        s+=50*len({"PVS1","PS_ClinVar"}&codes)+20*len({"PM2","PP3","PP5_ClinVar","PVS1_mod"}&codes)
-        s-=40*len({"BA1","BS_ClinVar"}&codes)+15*len({"BS1","BP4","BP6_ClinVar"}&codes)
-        if call.split(" |")[0]=="Pathogenic": s+=30
-        if v["filter"]!="PASS": s-=25
-        v["_raw"]=s
-        # phenotype score
-        if patient_ids:
-            ps,pd_,pm_,pdis,psh=gene_pheno_score(v.get("gene_id"),patient_ids,patient_full)
-            v.update(pheno_score=ps,pheno_direct=pd_,pheno_matched=pm_,pheno_disease=pdis,pheno_shared=psh)
-        else:
-            v.update(pheno_score=0.0,pheno_direct=0,pheno_matched=0,pheno_disease="",pheno_shared="")
-        print(f"[raredx] {i}/{len(variants)} {v.get('gene')} {v['consequence']} -> {call}", file=sys.stderr)
-
-    # normalize variant score, combine
-    raws=[v["_raw"] for v in variants]; lo,hi=min(raws),max(raws)
-    for v in variants:
-        vs=round((v["_raw"]-lo)/(hi-lo),3) if hi>lo else 0.5
-        if v.get("esm2_call")=="deleterious": vs=min(vs+0.08,1.0)
-        elif v.get("esm2_call")=="tolerated": vs=max(vs-0.08,0.0)
-        # AlphaMissense weighted slightly higher than ESM-2 8M (clinically calibrated predictor)
-        if v.get("am_call")=="deleterious": vs=min(vs+0.10,1.0)
-        elif v.get("am_call")=="tolerated": vs=max(vs-0.10,0.0)
-        v["variant_score"]=round(vs,3)
-        c=0.55*v["variant_score"]+0.45*v["pheno_score"] if patient_ids else v["variant_score"]
-        if v["filter"]!="PASS": c*=0.5
-        v["combined"]=round(c,3)
-    variants.sort(key=lambda v:-v["combined"])
-    for i,v in enumerate(variants,1): v["rank"]=i
-
-    # CSV
-    import csv
-    cols=["rank","gene","rsid","chrom","pos","ref","alt","consequence","protein","af",
-          "clinvar","stars","pli","loeuf","sift","polyphen","call","variant_score",
-          "pheno_score","pheno_direct","pheno_disease","pheno_shared","combined","filter","acmg_tags","esm2_llr","esm2_call","am_pathogenicity","am_call"]
-    with open(f"{a.out_prefix}_annotated.csv","w",newline="") as fh:
-        w=csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore"); w.writeheader()
-        for v in variants: w.writerow(v)
-    write_html(variants, patient_hpo, a.out_prefix)
+    def cli_progress(done, total, msg): print(f"[raredx] {msg}", file=sys.stderr)
+    result=run_pipeline(a.vcf, sample=a.sample, hpo=hpo_arg, clinical_note_text=note,
+                        assembly=a.assembly, use_esm=a.esm, use_am=a.alphamissense,
+                        email=a.email, anthropic_key=a.anthropic_key, progress=cli_progress)
+    write_outputs(result, a.out_prefix)
     print(f"[raredx] wrote {a.out_prefix}_annotated.csv and {a.out_prefix}_report.html", file=sys.stderr)
 
 if __name__=="__main__":
