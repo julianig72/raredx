@@ -644,7 +644,8 @@ td{{padding:7px 8px;border-top:1px solid #eef1f5}} .note{{background:#fff8e1;bor
 CSV_COLS=["rank","gene","rsid","chrom","pos","ref","alt","consequence","protein","af",
           "clinvar","stars","pli","loeuf","sift","polyphen","call","variant_score",
           "pheno_score","pheno_direct","pheno_disease","pheno_shared","combined","filter",
-          "acmg_tags","esm2_llr","esm2_call","am_pathogenicity","am_call"]
+          "acmg_tags","esm2_llr","esm2_call","am_pathogenicity","am_call",
+          "agentic_evaluated","reflect_verdict"]
 
 def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, assembly="GRCh38",
                  use_esm=False, use_am=False, agentic=False, email=None, anthropic_key=None, progress=None):
@@ -748,6 +749,9 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
     if agentic:
         agentic_result=agentic_diagnosis(variants, patient_hpo, api_key=anthropic_key,
                                           sample=sample, progress=progress)
+        # flag which rows the LLM self-reflection actually examined (only the top-K window)
+        for v in variants:
+            v["agentic_evaluated"]="yes" if v.get("reflect_verdict") else "no"
 
     return {"variants":variants, "patient_hpo":patient_hpo, "csv_cols":CSV_COLS,
             "n_input":len(variants), "assembly":assembly, "agentic":agentic_result}
