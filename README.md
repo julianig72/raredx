@@ -1,9 +1,44 @@
 # raredx — Análisis de VCF con IA para diagnóstico de enfermedades raras
 
 Pipeline moderno que anota un VCF y prioriza variantes candidatas para diagnóstico de
-enfermedades raras, combinando **cuatro capas de evidencia + tres capas de IA**, con
+enfermedades raras, combinando **cuatro capas de evidencia clásica + cuatro capas de IA**, con
 priorización dirigida por fenotipo al estilo de Exomiser. Soporta **GRCh38 y GRCh37/hg19**
 (este último con liftover automático a GRCh38 donde hace falta).
+
+Todo el análisis se apoya en **APIs REST públicas en vivo** (Ensembl, gnomAD, ClinVar, Open
+Targets, OLS4): no hay que descargar bases de datos de gigabytes ni mantener índices locales.
+
+## Instalación
+
+Requiere **Python 3.10+**. La única dependencia obligatoria es `requests`; las capas de IA
+tienen dependencias opcionales que solo se instalan si vas a usarlas.
+
+```bash
+git clone https://github.com/julianig72/raredx.git
+cd raredx
+
+# 1) Núcleo (obligatorio) — anotación + fenotipo + AlphaMissense + capa agéntica sin dependencias pesadas
+pip install requests
+
+# 2) Opcional — ESM-2 (IA-2). Añade ~2 GB (PyTorch). Sin GPU usa el modelo 8M en CPU.
+pip install torch fair-esm
+
+# 3) Opcional — extracción de HPO desde nota clínica (IA-1) y capa agéntica (IA-4)
+pip install anthropic
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+| Necesitas… | Instala | Requiere clave/GPU |
+|------------|---------|--------------------|
+| Anotación + fenotipo + ranking | `requests` | no |
+| AlphaMissense (IA-3) | *(nada extra)* — vía Ensembl VEP | no |
+| ESM-2 (IA-2) | `torch fair-esm` | GPU opcional (8M corre en CPU) |
+| HPO desde texto (IA-1) | `anthropic` | `ANTHROPIC_API_KEY` |
+| Capa agéntica (IA-4) | `anthropic` | `ANTHROPIC_API_KEY` |
+
+> **Conexión a internet obligatoria:** todas las anotaciones se resuelven contra APIs REST en vivo.
+
+Para la **herramienta web** (interfaz para clínicos), ver [`web/README.md`](web/README.md).
 
 ## Arquitectura
 
@@ -33,13 +68,15 @@ priorización dirigida por fenotipo al estilo de Exomiser. Soporta **GRCh38 y GR
                         Ranking + informe HTML + CSV
 ```
 
-## Las cuatro capas de IA (novedad)
+## Las cuatro capas de IA
 
 ### IA-1 - Extraccion de fenotipo HPO desde nota clinica (LLM)
 En vez de introducir codigos HPO a mano, **pegas la nota clinica en lenguaje natural** y un
-LLM (Claude) extrae los fenotipos presentes, que OLS4 aterriza a terminos HPO oficiales.
-Captura signos sutiles: *"el nino sabe salado"* -> `HP:0012236` (cloruro en sudor elevado,
-patognomonico de fibrosis quistica), *"acropaquias"* -> `HP:0100759` (dedos en palillo de tambor).
+LLM extrae los fenotipos presentes, que OLS4 aterriza a terminos HPO oficiales. Trabaja en
+varios idiomas y captura descripciones coloquiales de signos, no solo terminologia medica
+formal (p. ej. una descripcion de sudor salado se normaliza a `HP:0012236` "cloruro en sudor
+elevado"; "dedos en palillo de tambor" a `HP:0100759`). Cada termino extraido queda ligado a
+la frase de la nota que lo justifica, para trazabilidad.
 
 ```bash
 python raredx_pipeline.py input.vcf --clinical-note examples/clinical_note_es.txt --out-prefix out/p
@@ -94,9 +131,13 @@ python raredx_pipeline.py input.vcf --agentic --alphamissense --assembly GRCh37 
        --hpo "HP:0001250,HP:0011097" --out-prefix out/p
 ```
 
-En el caso real de epilepsia, esta capa **reordena por razonamiento clínico**: PNKP (que salía #1
-por score crudo) baja porque es recesivo con una sola variante heterocigota, y **SCN1A p.Cys1376Arg
-emerge como hipótesis principal (Dravet, alta verosimilitud)** con enlaces verificados a ClinVar/Ensembl.
+El resultado es que la capa **reordena por razonamiento clínico** en vez de solo por score
+numérico: una variante puede tener el score más alto de la lista y aun así ser descartada por
+incoherencia con la herencia (p. ej. un único alelo heterocigoto en un gen recesivo, o una
+llamada ligada al X incompatible con el sexo), mientras que otra con menor score crudo pero
+coherente con el fenotipo y la herencia asciende. El alcance es configurable con `start_k`
+(por defecto 8): solo el top-K pasa por la autorreflexión, y la ventana se amplía únicamente
+si todos los candidatos se refutan. El CSV marca cada fila con `agentic_evaluated` (yes/no).
 
 ## Motor de variante (ACMG-lite)
 
@@ -109,27 +150,30 @@ emerge como hipótesis principal (Dravet, alta verosimilitud)** con enlaces veri
 | **IA missense** | **ESM-2** | **LLR evolutivo -> PP3/BP4** |
 | **IA missense** | **AlphaMissense** | **patogenicidad 0-1 -> PP3/BP4** |
 
-## Efecto demostrado
+## Cómo se combina la evidencia (scoring)
 
-Con un perfil de fibrosis quistica extraido de la nota clinica (10 terminos HPO), **CFTR
-sube del puesto #3-4 (solo variante) al #1**; BRCA1 -mayor score de variante pero sin
-relacion fenotipica- baja al #2. El diseno multicapa evita falsos positivos: TP53 P72R y
-APOE R176C salen "deletereas" por ESM-2 (LLR -3.3 y -6.5), pero su alta frecuencia poblacional
-(regla BA1) y la ausencia de coincidencia fenotipica las mantienen correctamente como benignas
--ESM-2 no atropella la evidencia clinica/poblacional. Los cambios de aminoacido se anotan por
-region+alelo del VCF para que el residuo mutante puntuado por ESM-2 coincida con el alelo real
-del paciente (p. ej. BRCA1 A566E, EGFR L858R, TP53 P72R).
+El motor calcula un `variant_score` (0-1) por variante a partir de la evidencia ACMG-lite, y lo
+modula con las capas de IA missense:
 
-## Caso real: epilepsia infantil (GRCh37)
+- **ESM-2** y **AlphaMissense** aportan `PP3` (deletérea) o `BP4` (tolerada) y ajustan el
+  `variant_score`; AlphaMissense pesa algo más por ser un predictor clínicamente calibrado. Como
+  son dos predictores independientes, se complementan: cuando el modelo ESM-2 8M falla en un caso
+  límite, AlphaMissense puede corregirlo (y viceversa), evitando depender de un único método.
+- La **frecuencia poblacional manda sobre el in-silico**: una variante que un predictor marque
+  "deletérea" pero que sea común en gnomAD (regla `BA1`/`BS1`) se mantiene benigna — la IA no
+  atropella la evidencia poblacional ni la clínica de ClinVar.
+- Los cambios de aminoácido se anotan **por región + alelo** del propio VCF (no por rsID), para
+  que el residuo mutante que se puntúa corresponda exactamente al alelo del paciente y no a otro
+  alelo del mismo locus.
 
-Sobre un VCF clínico real (varón, 10 meses, epilepsia; GRCh37/hg19; 1730 variantes → 871 PASS
-únicas → 42 raras/impactantes → 16 en genes de epilepsia), la hipótesis principal fue **SCN1A
-p.Cys1376Arg** (síndrome de Dravet). Aquí las capas de IA se complementan: **ESM-2 8M la marcó
-tolerada por error (LLR +0.08), pero AlphaMissense la clasificó correctamente como probablemente
-patogénica (0.999)**, en concordancia con SIFT/PolyPhen, la ausencia en gnomAD y el criterio PM5
-(el codón Cys1376 ya alberga en ClinVar la variante C1376Y *patogénica* y C1376S *probablemente
-patogénica* — verificado vía ClinVar E-utilities; el cambio del paciente, C1376R, es distinto y aún no reportado). Es la ilustración de por qué no se
-usa un único predictor: AlphaMissense corrige el punto débil de ESM-2 8M en casos límite.
+Si se aporta fenotipo, el score final combina variante y fenotipo:
+
+```
+combined = 0.55 * variant_score + 0.45 * pheno_score     (× 0.5 si la variante no pasa el QC del VCF)
+```
+
+Así, entre dos variantes con evidencia molecular parecida, la que encaja con la clínica del
+paciente asciende en el ranking — el principio de priorización dirigida por fenotipo de Exomiser.
 
 ## Uso completo
 
