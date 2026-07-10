@@ -41,6 +41,15 @@
   .btns a.csv{background:#eef1f5;color:#34495e}
   .err{display:none;background:#fdf2f2;border:1px solid #f5c6cb;border-left:4px solid #c0392b;border-radius:8px;padding:12px 16px;color:#c0392b;font-size:13px;margin-top:14px}
   .path{color:#c0392b;font-weight:700}
+  .dx{border-left:4px solid #7f8c8d;border-radius:8px;background:#fafbfc;padding:12px 16px;margin:9px 0}
+  .dx.high{border-color:#c0392b} .dx.moderate{border-color:#e67e22} .dx.low{border-color:#7f8c8d}
+  .dx h3{margin:0;font-size:14.5px}
+  .dx .lk{font-size:10.5px;font-weight:700;text-transform:uppercase}
+  .dx .meta{font-size:11.5px;color:#7f8c8d;margin:3px 0}
+  .dx .rat{font-size:12.5px;margin:6px 0}
+  .dx .nx{font-size:12px;color:#34495e}
+  .dx .lnk{margin-top:6px}
+  .dx .lnk a{font-size:11px;margin-right:10px;color:#2980b9;text-decoration:none}
   footer{text-align:center;color:#95a5a6;font-size:11px;margin:20px 0}
 </style>
 </head>
@@ -75,6 +84,11 @@ método ortogonal (Sanger) y ser interpretado por un genetista clínico con el c
     <span class="tog"><input type="checkbox" id="esm"><label style="margin:0">ESM-2 <span class="h">(requiere torch)</span></label></span>
   </div>
 
+  <label>Razonamiento agéntico <span class="h">— estilo DeepRare</span></label>
+  <div class="toggles">
+    <span class="tog"><input type="checkbox" id="agentic"><label style="margin:0">Diagnóstico diferencial + autorreflexión <span class="h">(LLM; revisa candidatos vs. fenotipo/herencia y sintetiza un diferencial trazable con enlaces verificados)</span></label></span>
+  </div>
+
   <button class="go" id="go">Analizar VCF</button>
 
   <div class="prog" id="prog">
@@ -85,6 +99,11 @@ método ortogonal (Sanger) y ser interpretado por un genetista clínico con el c
 </div>
 
 <div class="card results" id="results">
+  <div id="diffwrap" style="display:none">
+    <h2 style="margin:0 0 8px;font-size:16px">🧬 Diagnóstico diferencial <span style="color:#95a5a6;font-weight:400;font-size:12px">— razonamiento agéntico</span></h2>
+    <div id="diffbody"></div>
+    <hr style="border:0;border-top:1px solid #eef1f5;margin:18px 0">
+  </div>
   <h2 style="margin:0 0 4px;font-size:16px">Candidatos priorizados <span id="nvar" style="color:#95a5a6;font-weight:400;font-size:13px"></span></h2>
   <div class="btns">
     <a class="rep" id="repbtn" target="_blank">Ver informe completo</a>
@@ -123,6 +142,7 @@ $('go').onclick = async () => {
   fd.append('assembly', $('assembly').value);
   fd.append('esm', $('esm').checked);
   fd.append('alphamissense', $('am').checked);
+  fd.append('agentic', $('agentic').checked);
 
   let job;
   try {
@@ -150,6 +170,31 @@ function done(job, s){
   $('repbtn').href = '/api/report/' + job;
   $('csvbtn').href = '/api/csv/' + job;
   $('nvar').textContent = '· ' + s.n_variants + ' variantes analizadas';
+
+  // differential (agentic layer), if present
+  const diff = s.differential || [];
+  const dw = $('diffwrap'), db = $('diffbody');
+  if (diff.length) {
+    db.innerHTML = '';
+    diff.forEach((d, i) => {
+      const lk = (d.likelihood || 'low').toLowerCase();
+      const links = (d.evidence || []).map(e =>
+        `<a href="${e.url}" target="_blank">${e.label} ↗</a>`).join('');
+      const el = document.createElement('div');
+      el.className = 'dx ' + lk;
+      el.innerHTML =
+        `<h3>${i+1}. ${d.disease || '?'} <span class="lk" style="color:${lk==='high'?'#c0392b':lk==='moderate'?'#e67e22':'#7f8c8d'}">· ${lk}</span></h3>
+         <div class="meta"><b>Gen(es):</b> ${(d.genes||[]).join(', ')} · <b>Herencia:</b> ${d.inheritance||'?'} · <b>Variante(s):</b> ${(d.supporting_variants||[]).join('; ')}</div>
+         <div class="rat">${d.rationale||''}</div>
+         <div class="nx"><b>Siguiente paso:</b> ${d.next_steps||''}</div>
+         <div class="lnk">${links || '<span style="font-size:11px;color:#95a5a6">(sin enlaces verificados)</span>'}</div>`;
+      db.appendChild(el);
+    });
+    dw.style.display = 'block';
+  } else {
+    dw.style.display = 'none';
+  }
+
   const tb = $('topbody'); tb.innerHTML = '';
   (s.top || []).forEach(v => {
     const path = /pathogenic/i.test(v.call || '') && !/benign/i.test(v.call || '');
