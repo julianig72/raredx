@@ -1,0 +1,12 @@
+# raredx web backend
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+requests>=2.31
+
+# Optional AI layers (enable with --esm / the ESM toggle):
+#   torch>=2.0
+#   fair-esm>=2.0
+# Optional clinical-note LLM layer:
+#   anthropic>=0.25   (+ ANTHROPIC_API_KEY)
+# AlphaMissense needs NO extra deps (precomputed scores via Ensembl VEP).
