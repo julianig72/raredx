@@ -1,8 +1,9 @@
 # raredx — Análisis de VCF con IA para diagnóstico de enfermedades raras
 
 Pipeline moderno que anota un VCF y prioriza variantes candidatas para diagnóstico de
-enfermedades raras, combinando **cuatro capas de evidencia + dos capas de IA**, con
-priorización dirigida por fenotipo al estilo de Exomiser.
+enfermedades raras, combinando **cuatro capas de evidencia + tres capas de IA**, con
+priorización dirigida por fenotipo al estilo de Exomiser. Soporta **GRCh38 y GRCh37/hg19**
+(este último con liftover automático a GRCh38 donde hace falta).
 
 ## Arquitectura
 
@@ -17,6 +18,7 @@ priorización dirigida por fenotipo al estilo de Exomiser.
         |- gnomAD r4 (frecuencia, pLI)  |  + expansion ontologica
         |- ClinVar (significancia, *)   |  -> pheno_score
         |- [IA-2] ESM-2 (missense LLR)  |
+        |- [IA-3] AlphaMissense (0-1)   |
         +-> MOTOR DE VARIANTE (ACMG)    |
               -> variant_score ---------+
                                         v
@@ -25,7 +27,7 @@ priorización dirigida por fenotipo al estilo de Exomiser.
                         Ranking + informe HTML + CSV
 ```
 
-## Las dos capas de IA (novedad)
+## Las tres capas de IA (novedad)
 
 ### IA-1 - Extraccion de fenotipo HPO desde nota clinica (LLM)
 En vez de introducir codigos HPO a mano, **pegas la nota clinica en lenguaje natural** y un
@@ -47,6 +49,20 @@ Alimenta las reglas **PP3/BP4** del motor ACMG. Es el principio detras de AlphaM
 python raredx_pipeline.py input.vcf --esm --hpo "HP:0002205,HP:0001738" --out-prefix out/p
 ```
 
+### IA-3 - Patogenicidad de missense con AlphaMissense (DeepMind)
+**AlphaMissense** (Cheng et al. 2023, *Science*) es un predictor calibrado clínicamente que
+clasifica cada missense humana como `likely_pathogenic`/`ambiguous`/`likely_benign` con una
+puntuación 0-1. DeepMind **no liberó el modelo ejecutable** (licencia no comercial), solo las
+puntuaciones precalculadas de ~71 M variantes; el pipeline las consulta vía **Ensembl VEP**
+(flag `AlphaMissense=1`). Como AlphaMissense es **solo GRCh38**, un VCF GRCh37 se **lifta a
+GRCh38** por variante antes de consultar. Alimenta las reglas **PP3/BP4** (etiquetas `PP3_AM`/`BP4_AM`)
+y pesa algo más que ESM-2 8M en el score de variante, por ser un predictor clínico especializado.
+No requiere GPU ni descargar pesos.
+
+```bash
+python raredx_pipeline.py input.vcf --alphamissense --assembly GRCh37 --hpo "HP:0001250" --out-prefix out/p
+```
+
 ## Motor de variante (ACMG-lite)
 
 | Capa | Fuente | Aporta |
@@ -56,6 +72,7 @@ python raredx_pipeline.py input.vcf --esm --hpo "HP:0002205,HP:0001738" --out-pr
 | Restriccion genica | gnomAD | pLI, LOEUF (PVS1 en genes intolerantes a LoF) |
 | Significancia clinica | ClinVar | veredicto + estrellas de oro |
 | **IA missense** | **ESM-2** | **LLR evolutivo -> PP3/BP4** |
+| **IA missense** | **AlphaMissense** | **patogenicidad 0-1 -> PP3/BP4** |
 
 ## Efecto demostrado
 
@@ -68,18 +85,31 @@ APOE R176C salen "deletereas" por ESM-2 (LLR -3.3 y -6.5), pero su alta frecuenc
 region+alelo del VCF para que el residuo mutante puntuado por ESM-2 coincida con el alelo real
 del paciente (p. ej. BRCA1 A566E, EGFR L858R, TP53 P72R).
 
+## Caso real: epilepsia infantil (GRCh37)
+
+Sobre un VCF clínico real (varón, 10 meses, epilepsia; GRCh37/hg19; 1730 variantes → 871 PASS
+únicas → 42 raras/impactantes → 16 en genes de epilepsia), la hipótesis principal fue **SCN1A
+p.Cys1376Arg** (síndrome de Dravet). Aquí las capas de IA se complementan: **ESM-2 8M la marcó
+tolerada por error (LLR +0.08), pero AlphaMissense la clasificó correctamente como probablemente
+patogénica (0.999)**, en concordancia con SIFT/PolyPhen, la ausencia en gnomAD y el criterio PM5
+(el codón Cys1376 ya tiene variantes patogénicas en ClinVar). Es la ilustración de por qué no se
+usa un único predictor: AlphaMissense corrige el punto débil de ESM-2 8M en casos límite.
+
 ## Uso completo
 
 ```bash
 python raredx_pipeline.py input.vcf \
-       --clinical-note nota.txt \      # IA-1: HPO desde texto (o --hpo "HP:...")
+       --assembly GRCh37 \              # build del VCF (GRCh38 por defecto)
+       --clinical-note nota.txt \       # IA-1: HPO desde texto (o --hpo "HP:...")
        --esm \                          # IA-2: ESM-2 en missense
+       --alphamissense \                # IA-3: AlphaMissense en missense (sin GPU)
        --out-prefix salida/paciente \
        --email tu@institucion.org
 ```
 
 **Dependencias:** `requests` (base); `torch fair-esm` (para `--esm`); `anthropic` +
-`ANTHROPIC_API_KEY` (para `--clinical-note`). Sin GPU, ESM-2 usa el modelo 8M en CPU.
+`ANTHROPIC_API_KEY` (para `--clinical-note`). `--alphamissense` **no requiere dependencias
+extra ni GPU** (usa scores precalculados vía Ensembl VEP). Sin GPU, ESM-2 usa el modelo 8M en CPU.
 
 ## Salidas
 - `<prefix>_report.html` - informe clinico: nota->HPO, ranking con LLR de ESM-2, fichas de evidencia
