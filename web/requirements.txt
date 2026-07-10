@@ -10,3 +10,7 @@ requests>=2.31
 # Optional clinical-note LLM layer:
 #   anthropic>=0.25   (+ ANTHROPIC_API_KEY)
 # AlphaMissense needs NO extra deps (precomputed scores via Ensembl VEP).
+
+# Test-only (for web/test_server.py; not needed to run the server):
+#   pytest>=8.0
+#   httpx>=0.27        # required by fastapi.testclient.TestClient
