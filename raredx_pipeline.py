@@ -364,8 +364,237 @@ def extract_hpo_from_note(note_text, api_key=None):
                 break
     return out
 
+# ---------- agentic reasoning layer (inspired by DeepRare, Nature 2025) ----------
+LLM_MODEL = "claude-sonnet-4-5"
+
+def _llm_raw(system_p, user_p, api_key=None, max_tokens=2500):
+    """Return raw LLM text via the anthropic SDK (ANTHROPIC_API_KEY) or, if unavailable,
+    a `host.llm` accessor when running inside a Claude Science kernel. None if neither."""
+    import os
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        try:
+            import anthropic
+            msg = anthropic.Anthropic(api_key=key).messages.create(
+                model=LLM_MODEL, max_tokens=max_tokens, system=system_p,
+                messages=[{"role":"user","content":user_p}])
+            return msg.content[0].text
+        except Exception as e:
+            print(f"[raredx] anthropic error: {e}", file=sys.stderr)
+    _host = globals().get("host")  # injected in Claude Science kernels
+    if _host is not None and hasattr(_host, "llm"):
+        try:
+            return _host.llm(user_p, system=system_p, max_tokens=max_tokens)["text"]
+        except Exception as e:
+            print(f"[raredx] host.llm error: {e}", file=sys.stderr)
+    print("[raredx] agentic layer needs ANTHROPIC_API_KEY (or a host.llm accessor)", file=sys.stderr)
+    return None
+
+def _extract_json(raw):
+    """Extract a JSON object from an LLM reply that may wrap it in a ```json fence and/or
+    append prose commentary after it. Tries: fenced block -> whole string -> first {...last }."""
+    for cand in (
+        (re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.S) or [None, None])[1],
+        raw.strip(),
+        raw[raw.find("{"): raw.rfind("}") + 1] if "{" in raw and "}" in raw else None,
+    ):
+        if not cand: continue
+        try:
+            return json.loads(cand)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+def _llm_json(system_p, user_p, api_key=None, max_tokens=2500):
+    """Call the LLM and parse a STRICT-JSON reply. Returns dict/list or None on failure."""
+    raw = _llm_raw(system_p, user_p, api_key, max_tokens)
+    if raw is None: return None
+    obj = _extract_json(raw)
+    if obj is None:
+        print("[raredx] could not parse JSON from LLM reply", file=sys.stderr)
+    return obj
+
+def verify_links(urls, timeout=6):
+    """Reference-link verification (DeepRare anti-hallucination step): keep only URLs that
+    resolve (HTTP < 400). Returns {url: bool}. Best-effort; network failures count as invalid."""
+    out = {}
+    for u in dict.fromkeys(urls):
+        ok = False
+        try:
+            r = requests.head(u, timeout=timeout, allow_redirects=True, headers=UA)
+            if r.status_code >= 400 or r.status_code == 405:  # some servers reject HEAD
+                r = requests.get(u, timeout=timeout, allow_redirects=True, headers=UA, stream=True)
+            ok = r.status_code < 400
+        except Exception:
+            ok = False
+        out[u] = ok
+    return out
+
+def build_evidence(v):
+    """Build STRUCTURED evidence URLs for a variant (deterministic — no LLM-invented links).
+    Feeding the LLM a fixed menu of real URLs prevents hallucinated citations entirely."""
+    ev = {}
+    gene = v.get("gene"); rsid = v.get("rsid"); gid = v.get("gene_id")
+    if rsid and str(rsid).startswith("rs"):
+        ev["ClinVar (rsID)"] = f"https://www.ncbi.nlm.nih.gov/clinvar/?term={rsid}"
+        ev["dbSNP"] = f"https://www.ncbi.nlm.nih.gov/snp/{rsid}"
+    if gene:
+        ev["ClinVar (gene)"] = f"https://www.ncbi.nlm.nih.gov/clinvar/?term={gene}%5Bgene%5D"
+        ev["OMIM (gene)"] = f"https://www.omim.org/search?search={gene}"
+        ev["GeneReviews/PubMed"] = f"https://pubmed.ncbi.nlm.nih.gov/?term={gene}+{v.get('consequence','').replace('_variant','')}"
+    if gid:
+        ev["Open Targets"] = f"https://platform.opentargets.org/target/{gid}"
+        ev["Ensembl gene"] = f"https://www.ensembl.org/Homo_sapiens/Gene/Summary?g={gid}"
+    return ev
+
+def _zygosity(v):
+    gt = ((v.get("sample") or {}).get("GT") or "").replace("|", "/")
+    if gt in ("1/1","1"): return "homozygous"
+    if gt in ("0/1","1/0","0/2","1/2"): return "heterozygous"
+    return gt or "unknown"
+
+def agentic_diagnosis(variants, patient_hpo, api_key=None, sample="", progress=None,
+                      start_k=8, relax_step=8, max_rounds=3):
+    """DeepRare-style agentic layer over the ranked variant list:
+      1) SELF-REFLECTION: an LLM reviews the top-K candidates against the phenotype profile
+         and inheritance/zygosity, returning support|uncertain|refute + reasoning per candidate.
+         If ALL top-K are refuted, it deepens the candidate window (K += relax_step) and
+         re-reflects — the faithful analog of DeepRare increasing search depth N and re-iterating.
+      2) DIFFERENTIAL SYNTHESIS: groups the surviving candidates into a disease-level
+         differential with traceable reasoning, citing only STRUCTURED (pre-built) evidence URLs.
+      3) LINK VERIFICATION: every cited URL is checked to resolve; dead links are dropped.
+    Returns {differential, reflection, rounds, k_considered} or None if the LLM is unavailable."""
+    def _p(msg):
+        if progress:
+            try: progress(0, 0, msg)
+            except Exception: pass
+    if not variants: return None
+    hpo_str = ", ".join(f"{t['label']} ({t['hpo_id']})" for t in patient_hpo) or "(no HPO provided)"
+
+    def describe(v):
+        return {
+            "rank": v.get("rank"), "gene": v.get("gene"), "variant": f"{v.get('chrom')}:{v.get('pos')} {v.get('ref')}>{v.get('alt')}",
+            "consequence": v.get("consequence"), "protein": v.get("protein"),
+            "gnomad_af": v.get("af"), "clinvar": v.get("clinvar"), "clinvar_stars": v.get("stars"),
+            "acmg": v.get("acmg_tags"), "classification": (v.get("call") or "").split(" |")[0],
+            "alphamissense": v.get("am_pathogenicity"), "esm2_llr": v.get("esm2_llr"),
+            "zygosity": _zygosity(v), "chrom": v.get("chrom"),
+            "phenotype_match_disease": v.get("pheno_disease"), "phenotype_shared_terms": v.get("pheno_shared"),
+            "combined_score": v.get("combined"),
+        }
+
+    k = min(start_k, len(variants)); rounds = 0; reflection = None; supported = []
+    reflect_sys = (
+        "You are a clinical geneticist reviewing an automatically-prioritized variant list for a "
+        "rare-disease case. For EACH candidate, judge whether it plausibly explains the patient's "
+        "phenotype, weighing: gene-disease/phenotype fit, variant classification and ACMG evidence, "
+        "population frequency (common variants rarely cause rare disease), in-silico predictors "
+        "(AlphaMissense/ESM-2), and CRUCIALLY the inheritance pattern vs the observed zygosity "
+        "(e.g. a single heterozygous variant in a recessive gene with no second hit is a carrier, "
+        "not a cause; an X-linked heterozygous call in a male is suspicious). "
+        "Verdict must be one of: support, uncertain, refute. Return STRICT JSON.")
+    while rounds < max_rounds:
+        rounds += 1
+        _p(f"Autorreflexión (ronda {rounds}, {k} candidatos)…")
+        cands = [describe(v) for v in variants[:k]]
+        user = (f"Patient sample: {sample or 'n/a'}\nPhenotype (HPO): {hpo_str}\n\n"
+                f"Candidates (already ranked):\n{json.dumps(cands, ensure_ascii=False, indent=1)}\n\n"
+                'Return JSON: {"candidates":[{"rank":int,"gene":str,"verdict":"support|uncertain|refute",'
+                '"reasoning":str}],"all_refuted":bool}')
+        reflection = _llm_json(reflect_sys, user, api_key)
+        if not reflection: return None
+        verdicts = reflection.get("candidates", [])
+        supported = [c for c in verdicts if c.get("verdict") in ("support","uncertain")]
+        if supported or k >= len(variants):
+            break
+        k = min(k + relax_step, len(variants))  # deepen window and re-reflect
+
+    # attach verdicts back to variants by rank
+    vmap = {v.get("rank"): v for v in variants}
+    for c in reflection.get("candidates", []):
+        if c.get("rank") in vmap:
+            vmap[c["rank"]]["reflect_verdict"] = c.get("verdict")
+            vmap[c["rank"]]["reflect_reasoning"] = c.get("reasoning")
+
+    # build verified evidence menu for the supported candidates
+    _p("Verificando enlaces de evidencia…")
+    focus = supported or reflection.get("candidates", [])[:3]
+    focus_ranks = [c["rank"] for c in focus if c.get("rank") in vmap]
+    evidence = {}   # rank -> {label:url} verified
+    all_urls = []
+    per_rank_ev = {}
+    for rk in focus_ranks:
+        ev = build_evidence(vmap[rk]); per_rank_ev[rk] = ev; all_urls += list(ev.values())
+    valid = verify_links(all_urls)
+    for rk in focus_ranks:
+        evidence[rk] = {lab: u for lab, u in per_rank_ev[rk].items() if valid.get(u)}
+
+    # differential synthesis grounded on verified links only
+    _p("Sintetizando diagnóstico diferencial…")
+    diff_sys = (
+        "You are a clinical geneticist writing a differential diagnosis from the SUPPORTED variant "
+        "candidates. Group them into disease-level hypotheses (a disease, its gene(s), the supporting "
+        "variant(s), the inheritance pattern, and a concise evidence-grounded rationale). Rank the "
+        "differential by likelihood. Cite ONLY URLs from the provided verified-evidence menu — never "
+        "invent links. This is decision support, not a diagnosis. Return STRICT JSON.")
+    focus_desc = [dict(describe(vmap[rk]),
+                       verified_evidence=evidence.get(rk, {}),
+                       verdict=next((c["verdict"] for c in focus if c.get("rank")==rk), None),
+                       reflection=vmap[rk].get("reflect_reasoning"))
+                  for rk in focus_ranks]
+    duser = (f"Phenotype (HPO): {hpo_str}\n\nSupported candidates with verified evidence links:\n"
+             f"{json.dumps(focus_desc, ensure_ascii=False, indent=1)}\n\n"
+             'Return JSON: {"differential":[{"disease":str,"genes":[str],"inheritance":str,'
+             '"supporting_variants":[str],"likelihood":"high|moderate|low","rationale":str,'
+             '"evidence":[{"label":str,"url":str}],"next_steps":str}]}')
+    diff = _llm_json(diff_sys, duser, api_key)
+    differential = (diff or {}).get("differential", []) if diff else []
+    # final guard: strip any URL the LLM emitted that isn't in the verified set
+    verified_set = {u for u,ok in valid.items() if ok}
+    for d in differential:
+        d["evidence"] = [e for e in d.get("evidence", []) if e.get("url") in verified_set]
+
+    return {"differential": differential,
+            "reflection": reflection.get("candidates", []),
+            "rounds": rounds, "k_considered": k,
+            "n_verified_links": len(verified_set)}
+
 # ---------- report ----------
-def write_html(variants, patient_hpo, prefix, assembly="GRCh38"):
+def _differential_html(agentic):
+    """Render the DeepRare-style differential + self-reflection block, or '' if absent."""
+    if not agentic or not agentic.get("differential"):
+        return ""
+    LK={"high":"#c0392b","moderate":"#e67e22","low":"#7f8c8d"}
+    cards=[]
+    for i,d in enumerate(agentic["differential"],1):
+        lk=(d.get("likelihood") or "low").lower()
+        links="".join(f'<a href="{html.escape(e["url"])}" target="_blank" style="font-size:11px;margin-right:10px;color:#2980b9">{html.escape(e["label"])} ↗</a>'
+                      for e in d.get("evidence",[]))
+        genes=", ".join(d.get("genes",[])); svar="; ".join(d.get("supporting_variants",[]))
+        cards.append(
+            f'<div style="background:#fff;border-left:4px solid {LK.get(lk,"#7f8c8d")};border-radius:8px;padding:14px 18px;margin:10px 0">'
+            f'<div style="font-size:15px;font-weight:700">{i}. {html.escape(d.get("disease","?"))} '
+            f'<span style="font-size:11px;font-weight:600;color:{LK.get(lk,"#7f8c8d")};text-transform:uppercase">· {html.escape(lk)}</span></div>'
+            f'<div style="font-size:12px;color:#7f8c8d;margin:3px 0"><b>Gen(es):</b> {html.escape(genes)} &nbsp;·&nbsp; '
+            f'<b>Herencia:</b> {html.escape(d.get("inheritance","?"))} &nbsp;·&nbsp; <b>Variante(s):</b> {html.escape(svar)}</div>'
+            f'<div style="font-size:12.5px;margin:6px 0">{html.escape(d.get("rationale",""))}</div>'
+            f'<div style="font-size:12px;color:#34495e;margin-top:4px"><b>Siguiente paso:</b> {html.escape(d.get("next_steps",""))}</div>'
+            f'<div style="margin-top:6px">{links or "<span style=\'font-size:11px;color:#95a5a6\'>(sin enlaces verificados)</span>"}</div></div>')
+    ref=agentic.get("reflection",[])
+    refuted=[c for c in ref if c.get("verdict")=="refute"]
+    ref_html=""
+    if refuted:
+        items="".join(f'<li style="margin:4px 0"><b>{html.escape(str(c.get("gene") or "?"))}</b> (#{c.get("rank")}): {html.escape(c.get("reasoning",""))}</li>' for c in refuted[:8])
+        ref_html=(f'<details style="margin:10px 0"><summary style="cursor:pointer;font-size:12.5px;color:#7f8c8d">'
+                  f'Autorreflexión: {len(refuted)} candidato(s) descartado(s) por incoherencia clínica</summary>'
+                  f'<ul style="font-size:12px;color:#555">{items}</ul></details>')
+    meta=(f'<div style="font-size:11px;color:#95a5a6;margin-top:4px">Capa agéntica: {agentic.get("rounds",1)} ronda(s) de '
+          f'autorreflexión · {agentic.get("k_considered","?")} candidatos evaluados · '
+          f'{agentic.get("n_verified_links",0)} enlaces de evidencia verificados</div>')
+    return (f'<div style="margin:16px 0"><h2 style="font-size:16px;color:#1e2a38;margin:0 0 4px">'
+            f'🧬 Diagnóstico diferencial (razonamiento agéntico)</h2>{meta}{"".join(cards)}{ref_html}</div>')
+
+def write_html(variants, patient_hpo, prefix, assembly="GRCh38", agentic=None):
     TC={"Pathogenic":"#c0392b","Likely pathogenic":"#e67e22","Uncertain significance (VUS)":"#7f8c8d",
         "Likely benign":"#27ae60","Benign":"#2ecc71"}
     tier=lambda c:"Benign" if c.split(" |")[0].startswith("Benign") else c.split(" |")[0]
@@ -403,6 +632,8 @@ td{{padding:7px 8px;border-top:1px solid #eef1f5}} .note{{background:#fff8e1;bor
 <header><h1>raredx - Informe genomico priorizado por fenotipo</h1>
 <div style="color:#9fb3c8;font-size:12px">{assembly} | {len(variants)} variantes | {now}</div></header>
 <div class="hpobar"><b>Perfil HPO del paciente ({len(patient_hpo)}):</b><br>{chips or "(ninguno - solo ranking por variante)"}</div>
+{_differential_html(agentic)}
+<h2 style="font-size:14px;color:#1e2a38;margin:18px 0 4px">Variantes candidatas priorizadas</h2>
 <table><thead><tr><th>#</th><th>Gen</th><th>Variante</th><th>gnomAD</th><th>ClinVar</th><th>IA</th><th>Clase</th><th>Var</th><th>Feno</th><th>Comb</th><th>QC</th></tr></thead>
 <tbody>{rows}</tbody></table>
 <div class="note"><b>Sistema de apoyo a la decision, no diagnostico.</b> VEP + gnomAD + ClinVar (score de variante ACMG-lite) x fenotipos HPO de Open Targets (score fenotipico). Confirmar por metodo ortogonal e interpretar en contexto clinico.</div>
@@ -416,7 +647,7 @@ CSV_COLS=["rank","gene","rsid","chrom","pos","ref","alt","consequence","protein"
           "acmg_tags","esm2_llr","esm2_call","am_pathogenicity","am_call"]
 
 def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, assembly="GRCh38",
-                 use_esm=False, use_am=False, email=None, anthropic_key=None, progress=None):
+                 use_esm=False, use_am=False, agentic=False, email=None, anthropic_key=None, progress=None):
     """Annotate a VCF and prioritize variants. Reusable entry point for CLI and web server.
 
     Args:
@@ -512,8 +743,14 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
     for i,v in enumerate(variants,1): v["rank"]=i
     _prog(len(variants), len(variants), "Priorización completa")
 
+    # agentic reasoning layer (self-reflection + traceable differential) — optional, needs LLM
+    agentic_result=None
+    if agentic:
+        agentic_result=agentic_diagnosis(variants, patient_hpo, api_key=anthropic_key,
+                                          sample=sample, progress=progress)
+
     return {"variants":variants, "patient_hpo":patient_hpo, "csv_cols":CSV_COLS,
-            "n_input":len(variants), "assembly":assembly}
+            "n_input":len(variants), "assembly":assembly, "agentic":agentic_result}
 
 def write_outputs(result, out_prefix):
     """Write <prefix>_annotated.csv and <prefix>_report.html from a run_pipeline() result."""
@@ -521,7 +758,8 @@ def write_outputs(result, out_prefix):
     with open(f"{out_prefix}_annotated.csv","w",newline="") as fh:
         w=csv.DictWriter(fh, fieldnames=result["csv_cols"], extrasaction="ignore"); w.writeheader()
         for v in result["variants"]: w.writerow(v)
-    write_html(result["variants"], result["patient_hpo"], out_prefix, result.get("assembly","GRCh38"))
+    write_html(result["variants"], result["patient_hpo"], out_prefix, result.get("assembly","GRCh38"),
+               result.get("agentic"))
 
 def main():
     ap=argparse.ArgumentParser(description="raredx VCF annotation & phenotype prioritization")
@@ -534,6 +772,7 @@ def main():
     ap.add_argument("--alphamissense", action="store_true", help="Score missense with AlphaMissense (precomputed, via Ensembl VEP; no GPU)")
     ap.add_argument("--assembly", default="GRCh38", choices=["GRCh38","GRCh37"], help="Genome build of the input VCF (AlphaMissense lifts GRCh37->GRCh38)")
     ap.add_argument("--clinical-note", default=None, help="Path to free-text clinical note; extracts HPO via LLM (needs ANTHROPIC_API_KEY)")
+    ap.add_argument("--agentic", action="store_true", help="Agentic layer: LLM self-reflection over candidates + traceable differential diagnosis with link verification (needs ANTHROPIC_API_KEY)")
     ap.add_argument("--anthropic-key", default=None, help="Anthropic API key (else uses ANTHROPIC_API_KEY env)")
     a=ap.parse_args()
 
@@ -544,7 +783,7 @@ def main():
     def cli_progress(done, total, msg): print(f"[raredx] {msg}", file=sys.stderr)
     result=run_pipeline(a.vcf, sample=a.sample, hpo=hpo_arg, clinical_note_text=note,
                         assembly=a.assembly, use_esm=a.esm, use_am=a.alphamissense,
-                        email=a.email, anthropic_key=a.anthropic_key, progress=cli_progress)
+                        agentic=a.agentic, email=a.email, anthropic_key=a.anthropic_key, progress=cli_progress)
     write_outputs(result, a.out_prefix)
     print(f"[raredx] wrote {a.out_prefix}_annotated.csv and {a.out_prefix}_report.html", file=sys.stderr)
 
