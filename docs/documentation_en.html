@@ -1,0 +1,251 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>raredx · Scientific pipeline documentation</title>
+<style>
+ body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:940px;margin:auto;padding:32px 30px;background:#fbfcfd;color:#22303c;line-height:1.62;font-size:15px}
+ header{background:#1e2a38;color:#fff;padding:26px 30px;border-radius:12px;margin-bottom:22px}
+ header h1{margin:0;font-size:25px} header .sub{color:#9fb3c8;font-size:13.5px;margin-top:6px}
+ h2{font-size:19px;color:#1e2a38;border-bottom:2px solid #e4e9ef;padding-bottom:6px;margin-top:36px}
+ h3{font-size:15.5px;color:#34495e;margin-top:24px}
+ code{background:#eef1f5;padding:1px 6px;border-radius:4px;font-size:13px;color:#c0392b;font-family:ui-monospace,Menlo,monospace}
+ pre{background:#1e2a38;color:#e6edf3;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:12.5px;line-height:1.5}
+ pre code{background:none;color:inherit;padding:0}
+ table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;font-size:13px;margin:14px 0;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+ th{background:#eef1f5;text-align:left;padding:9px;font-size:11px;text-transform:uppercase;color:#7f8c8d;letter-spacing:.03em}
+ td{padding:8px 10px;border-top:1px solid #eef1f5;vertical-align:top}
+ .flow{background:#1e2a38;color:#e6edf3;border-radius:10px;padding:18px 22px;font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre;overflow-x:auto;line-height:1.5}
+ .eq{background:#f2f6fb;border-left:4px solid #2980b9;border-radius:6px;padding:10px 16px;margin:14px 0;font-family:ui-monospace,Menlo,monospace;font-size:13px}
+ .warn{background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:14px 18px;color:#795548;font-size:13.5px;margin:20px 0}
+ .toc{background:#fff;border-radius:10px;padding:16px 24px;font-size:13.5px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+ .toc a{text-decoration:none;color:#2980b9} .toc li{margin:3px 0}
+ a{color:#2980b9} .ref{font-size:13px;color:#5a6b7a}
+</style></head><body>
+
+<header>
+ <h1>raredx — Scientific pipeline documentation</h1>
+ <div class="sub">VCF annotation and phenotype-driven variant prioritization for rare-disease diagnosis · 2026-07-10</div>
+</header>
+
+<div class="toc"><b>Contents</b>
+<ol>
+ <li><a href="#overview">Method overview</a></li>
+ <li><a href="#inputs">Inputs and assembly detection</a></li>
+ <li><a href="#annotation">1 · Per-variant annotation</a></li>
+ <li><a href="#acmg">2 · ACMG-lite classification (exact rules)</a></li>
+ <li><a href="#ai-missense">3 · AI predictors for missense (ESM-2, AlphaMissense)</a></li>
+ <li><a href="#phenotype">4 · Phenotype engine (HPO / Open Targets)</a></li>
+ <li><a href="#ia1">5 · Phenotype extraction from free text (LLM)</a></li>
+ <li><a href="#combined">6 · Combined scoring and ranking</a></li>
+ <li><a href="#agentic">7 · Agentic layer (self-reflection + traceable differential)</a></li>
+ <li><a href="#outputs">8 · Outputs</a></li>
+ <li><a href="#limits">9 · Assumptions, limits and validity</a></li>
+ <li><a href="#refs">References and data sources</a></li>
+</ol></div>
+
+<h2 id="overview">Method overview</h2>
+<p>raredx implements a two-engine variant-prioritization workflow. The <b>variant engine</b> annotates
+each allele with functional, population and clinical evidence and assigns a pathogenicity
+classification inspired by the ACMG/AMP guidelines (Richards et al., 2015). The <b>phenotype engine</b>
+measures the affinity between each variant's gene and the patient's phenotype encoded in HPO. The two
+signals are integrated into a single score that ranks candidate variants. Optionally, an
+<b>agentic layer</b> built on a large language model reasons over the ranked list and produces a
+disease-level differential diagnosis with verified evidence. All annotations are resolved against
+live public REST APIs; no local databases are maintained.</p>
+
+<div class="flow">  clinical note (text)                     VCF
+        │ [5] LLM → HPO (OLS4)              │
+        ▼                                    ▼
+  HPO profile ───────────┐          [1] per-variant annotation
+                         │           Ensembl VEP · gnomAD r4 · ClinVar
+   [4] phenotype engine  │           [3] ESM-2 · AlphaMissense
+   gene→disease→HPO (OT) │                  │
+   → pheno_score         │          [2] ACMG-lite classification
+                         │           → variant_score (0–1)
+                         └──────────────────┤
+                                            ▼
+              [6]  combined = 0.55·variant_score + 0.45·pheno_score
+                                            ▼
+                                   variant ranking
+                                            ▼
+           [7] agentic layer: self-reflection → differential + verified links
+                                            ▼
+                               HTML report + CSV</div>
+
+<h2 id="inputs">Inputs and assembly detection</h2>
+<p>The primary input is a VCF file. The parser extracts, per record: chromosome (the <code>chr</code>
+prefix is stripped; <code>chrM</code>→<code>MT</code>), position, ref, first alt allele, rsID, QUAL,
+FILTER, and the sample genotype field (<code>GT</code> and the remaining FORMAT keys, retained for
+zygosity reasoning). The assembly is set with <code>--assembly {GRCh38|GRCh37}</code> (default
+GRCh38). GRCh37/hg19 support is first-class: annotation uses the Ensembl VEP GRCh37 endpoint, and
+where a source exists only in GRCh38 (AlphaMissense), the coordinate is <b>lifted to GRCh38
+per variant</b> through the Ensembl assembly-mapping service.</p>
+
+<h2 id="annotation">1 · Per-variant annotation</h2>
+<p>Each allele is annotated by querying three sources:</p>
+<table>
+<thead><tr><th>Source</th><th>Endpoint</th><th>Fields obtained</th></tr></thead>
+<tbody>
+<tr><td>Ensembl VEP</td><td><code>[grch37.]rest.ensembl.org/vep/human/region</code> (POST)</td><td>most severe consequence, gene symbol, Ensembl ID, HGVSp, SIFT, PolyPhen, canonical/MANE transcript</td></tr>
+<tr><td>gnomAD r4</td><td>gnomAD GraphQL API (GRCh38) · VEP <code>colocated_variants</code> (GRCh37)</td><td>population allele frequency (AF), and per gene: pLI and LOEUF (loss-of-function constraint)</td></tr>
+<tr><td>ClinVar</td><td>NCBI E-utilities (<code>esearch</code>/<code>esummary</code>)</td><td>aggregated clinical significance + review level (gold stars, 0–4)</td></tr>
+</tbody></table>
+<p>Relevant technical points:</p>
+<ul>
+<li><b>Annotation by region + allele, not by rsID.</b> A single rsID can group several alt alleles;
+annotating by identifier may return the amino-acid change for a different allele than the one in the
+VCF. raredx always submits coordinate + the actual allele, so the scored mutant residue corresponds
+exactly to the patient's allele.</li>
+<li><b>Transcript selection.</b> Among per-transcript consequences, the one for the expected gene
+symbol is prioritized, with a MANE/canonical tiebreak, so that HGVSp and the residue stay
+consistent.</li>
+<li><b>Frequency in GRCh37.</b> Since the gnomAD GraphQL API is GRCh38-only, in GRCh37 mode the AF is
+harvested from the <code>colocated_variants</code> returned by the GRCh37 VEP itself.</li>
+</ul>
+
+<h2 id="acmg">2 · ACMG-lite classification (exact rules)</h2>
+<p>The classifier assigns criterion tags from fixed thresholds and combines them into a 5-tier verdict.
+The implemented thresholds are:</p>
+<table>
+<thead><tr><th>Criterion</th><th>Implemented condition</th><th>Direction</th></tr></thead>
+<tbody>
+<tr><td><code>BA1</code></td><td>gnomAD AF ≥ 0.05</td><td>benign (strong)</td></tr>
+<tr><td><code>BS1</code></td><td>gnomAD AF ≥ 0.01</td><td>benign (strong)</td></tr>
+<tr><td><code>PM2</code></td><td>absent from gnomAD r4, or AF &lt; 1×10⁻⁴</td><td>pathogenic (moderate)</td></tr>
+<tr><td><code>PVS1</code></td><td>LoF consequence (stop_gained, frameshift, splice donor/acceptor) <b>in a constrained gene</b> (pLI ≥ 0.9 or LOEUF &lt; 0.6); if constraint is modest → <code>PVS1_mod</code></td><td>pathogenic (very strong)</td></tr>
+<tr><td><code>PP3</code> / <code>BP4</code></td><td>SIFT deleterious &amp; PolyPhen damaging → PP3; SIFT tolerated &amp; PolyPhen benign → BP4</td><td>both directions</td></tr>
+<tr><td><code>PP3_ESM</code> / <code>BP4_ESM</code></td><td>ESM-2 call (see §3)</td><td>both directions</td></tr>
+<tr><td><code>PP3_AM</code> / <code>BP4_AM</code></td><td>AlphaMissense call (see §3)</td><td>both directions</td></tr>
+<tr><td><code>PS_ClinVar</code> / <code>PP5_ClinVar</code></td><td>ClinVar "pathogenic": ≥2★ → PS; &lt;2★ → PP5</td><td>pathogenic</td></tr>
+<tr><td><code>BS_ClinVar</code> / <code>BP6_ClinVar</code></td><td>ClinVar "benign": ≥2★ → BS; &lt;2★ → BP6</td><td>benign</td></tr>
+</tbody></table>
+<p>Tag combination yields the verdict: strong benign evidence with no pathogenic → <b>Benign/Likely
+benign</b>; <code>PVS1</code> + (<code>PM2</code> or <code>PS_ClinVar</code>) → <b>Pathogenic</b>;
+strong pathogenic evidence → <b>Likely pathogenic</b>; ≥2 supporting pathogenic evidences without
+benign → <b>Likely pathogenic</b>, a single one → <b>VUS</b>; supporting benign only → <b>Likely
+benign</b>; otherwise <b>VUS</b>. Variants flagged "drug response" in ClinVar are additionally tagged
+pharmacogenomic.</p>
+
+<h2 id="ai-missense">3 · AI predictors for missense variants</h2>
+<p>For missense variants, two modern in-silico predictors are added that feed PP3/BP4, superseding the
+historical role of SIFT/PolyPhen (~2010).</p>
+
+<h3>3.1 · ESM-2 (protein language model, Meta AI)</h3>
+<p>ESM-2 (Lin et al., 2023) scores each substitution by its <b>evolutionary likelihood</b> via a
+<i>masked-marginal log-likelihood ratio</i> (LLR): the mutated position is masked and the
+log-probability of the mutant residue is compared to the wild-type under the model. A 511-residue
+window is centered on the position. Implemented thresholds:</p>
+<div class="eq">LLR ≤ −3.0 → <b>deleterious</b> (PP3_ESM)  ·  LLR ≥ −0.5 → <b>tolerated</b> (BP4_ESM)  ·  in between → ambiguous</div>
+<p>The default model is <code>esm2_t6_8M_UR50D</code> (8 M parameters), which runs on CPU; it is a
+proof of concept. For serious use the 650 M / 3 B models (GPU) are recommended.</p>
+
+<h3>3.2 · AlphaMissense (DeepMind)</h3>
+<p>AlphaMissense (Cheng et al., 2023, <i>Science</i>) is a clinically calibrated predictor that assigns
+each human missense a 0–1 pathogenicity score and a class
+<code>likely_pathogenic</code> / <code>ambiguous</code> / <code>likely_benign</code>. DeepMind did not
+release the executable model (non-commercial license), only ~71 M precomputed scores; raredx queries
+them via <b>Ensembl VEP</b> (<code>AlphaMissense=1</code>). As it exists for GRCh38 only, a GRCh37 VCF
+is lifted per variant. The class is mapped to the internal vocabulary
+(likely_pathogenic→deleterious, likely_benign→tolerated) and feeds PP3_AM/BP4_AM. It requires no GPU
+and no weight download.</p>
+
+<h3>3.3 · Why two predictors</h3>
+<p>ESM-2 (unsupervised, evolutionary likelihood) and AlphaMissense (supervised, calibrated on clinical
+data) are methodologically independent. When the small ESM-2 8M model fails on a borderline case,
+AlphaMissense's clinical score can correct it, and vice versa. Both are integrated as supporting
+evidence (PP3/BP4), never as a sole arbiter.</p>
+
+<h2 id="phenotype">4 · Phenotype engine (HPO / Open Targets)</h2>
+<p>If a phenotype is provided, for each candidate gene (by its Ensembl ID) the associated diseases are
+retrieved from <b>Open Targets</b> (GraphQL) and, per disease, its HPO phenotypes
+(<code>phenotypeHPO</code>; Open Targets serves them in underscore form, <code>HP_xxxxxxx</code>,
+normalized to <code>HP:xxxxxxx</code>). The patient HPO profile is expanded ontologically with its
+ancestors. The <code>pheno_score</code> weights direct matches more strongly than ancestor-only
+matches:</p>
+<div class="eq">pheno_score = ( n<sub>direct</sub> · 1.0 + n<sub>ancestor-only</sub> · 0.4 ) / n<sub>patient HPO</sub>   (capped at 1.0)</div>
+<p>The disease with the most direct matches and its shared terms are also retained, to display them as
+evidence of the phenotype–gene match.</p>
+
+<h2 id="ia1">5 · Phenotype extraction from free text (LLM)</h2>
+<p>As an alternative to entering HPO codes manually, a <b>clinical note in natural language</b> can be
+provided. An LLM extracts only the <i>present</i> phenotypes (excluding negated findings, family
+history, and treatments) and returns, for each, the verbatim phrase that justifies it. Each phrase is
+grounded to an official HPO term by searching <b>OLS4</b> (ontology <code>hp</code>), preferring an
+exact label match. It works across languages and over colloquial descriptions, not just formal
+terminology. The phrase→HPO traceability is kept in the result.</p>
+
+<h2 id="combined">6 · Combined scoring and ranking</h2>
+<p>The <code>variant_score</code> (0–1) is obtained by normalizing the ACMG-lite evidence and modulating
+it with the missense AI calls: an ESM-2 <i>deleterious</i> call adds +0.08 and a <i>tolerated</i> call
+subtracts −0.08; AlphaMissense weighs slightly more (±0.10) as a clinically calibrated predictor. When
+a phenotype is present, the final score integrates both engines:</p>
+<div class="eq">combined = 0.55 · variant_score + 0.45 · pheno_score       (× 0.5 if the variant fails the VCF FILTER)</div>
+<p>Variants are sorted by <code>combined</code> in descending order. The effect is that, between two
+variants with similar molecular evidence, the one matching the clinical presentation rises — the
+phenotype-driven prioritization principle of Exomiser (Smedley et al., 2015).</p>
+
+<h2 id="agentic">7 · Agentic layer (self-reflection + traceable differential)</h2>
+<p class="ref">Inspired by DeepRare — "An agentic system for rare disease diagnosis with traceable
+reasoning" (<i>Nature</i> 2025, <a href="https://doi.org/10.1038/s41586-025-10097-9">doi:10.1038/s41586-025-10097-9</a>),
+whose full text was analyzed to adapt the three mechanisms below.</p>
+<p>Over the already-ranked list, an LLM runs:</p>
+<ol>
+<li><b>Self-reflection.</b> It reviews the first <code>start_k</code> candidates (default 8) against the
+HPO profile and the <b>inheritance pattern vs. observed zygosity</b> (derived from the VCF genotype),
+emitting a <code>support</code>/<code>uncertain</code>/<code>refute</code> verdict with reasoning per
+candidate. It detects incoherences invisible to a numeric ranking: a single heterozygous allele in a
+recessive gene with no second hit (carrier, not cause), or an X-linked call incompatible with sex. If
+<b>all</b> candidates in the window are refuted, the window is widened (<code>k += relax_step</code>)
+and the step is repeated, up to <code>max_rounds</code> (3) — the analog of DeepRare's loop that
+increases search depth and re-iterates.</li>
+<li><b>Differential synthesis.</b> The surviving candidates are grouped into disease-level hypotheses
+(disease, gene(s), supporting variant(s), inheritance, reasoning, next step), ranked by likelihood
+(high/moderate/low).</li>
+<li><b>Link verification (anti-hallucination).</b> Every citation uses exclusively URLs
+<b>built deterministically</b> from the variant's real identifiers (ClinVar, dbSNP, OMIM, Open
+Targets, Ensembl, PubMed). Each URL is checked with an HTTP request and kept only if it resolves
+(status &lt; 400). A final filter removes any link the LLM emitted outside the verified set: the model
+cannot introduce invented citations.</li>
+</ol>
+<p><b>Scope and degradation.</b> Only the top-K enters self-reflection; the rest is annotated but not
+reasoned over by the LLM (the CSV marks each row with <code>agentic_evaluated</code> = yes/no). If no
+LLM is available (no key or accessor), the analysis completes anyway and the differential is empty.</p>
+
+<h2 id="outputs">8 · Outputs</h2>
+<ul>
+<li><code>&lt;prefix&gt;_report.html</code> — report: HPO profile, agentic differential (if enabled) with
+verified links, and the prioritized variant table with classification, AI columns (AlphaMissense 0–1,
+ESM-2 LLR), variant/phenotype/combined scores and QC status.</li>
+<li><code>&lt;prefix&gt;_annotated.csv</code> — full table: consequence, HGVSp, AF, pLI/LOEUF, ClinVar,
+SIFT/PolyPhen, ESM-2, AlphaMissense, ACMG tags, scores and (where applicable) the self-reflection
+verdict.</li>
+</ul>
+
+<h2 id="limits">9 · Assumptions, limits and validity</h2>
+<div class="warn"><b>Decision-support system, not a diagnosis.</b> Every finding must be confirmed by an
+orthogonal method (e.g. Sanger) and interpreted by a clinical geneticist with the patient's full
+context.</div>
+<ul>
+<li><b>Requires internet:</b> all annotations are resolved against live REST APIs (Ensembl, gnomAD,
+ClinVar, Open Targets, OLS4).</li>
+<li><b>Variant scope:</b> SNVs and small indels. It does not cover CNVs, repeat expansions or
+structural variants.</li>
+<li><b>Simplified ACMG:</b> the engine implements a subset of criteria with fixed thresholds; it does
+not replace a full ACMG/AMP classification by an accredited laboratory.</li>
+<li><b>ESM-2 8M</b> is a proof of concept; borderline cases benefit from the 650M/3B model (GPU) or
+from AlphaMissense.</li>
+<li><b>Agentic layer:</b> the differential is an LLM-assisted synthesis over the retrieved evidence,
+with verified links; it is not a clinical conclusion.</li>
+</ul>
+
+<h2 id="refs">References and data sources</h2>
+<ul class="ref">
+<li>Richards S. et al. (2015) <i>Genet Med</i> — ACMG/AMP variant-interpretation guidelines.</li>
+<li>Lin Z. et al. (2023) <i>Science</i> — ESM-2 / ESMFold (protein language models).</li>
+<li>Cheng J. et al. (2023) <i>Science</i> — AlphaMissense.</li>
+<li>Smedley D. et al. (2015) <i>Nat Protoc</i> — Exomiser (phenotype-driven prioritization).</li>
+<li>DeepRare (2025) <i>Nature</i>, <a href="https://doi.org/10.1038/s41586-025-10097-9">doi:10.1038/s41586-025-10097-9</a> — agentic system with traceable reasoning.</li>
+<li>Live sources: Ensembl VEP · gnomAD r4 · ClinVar (NCBI E-utilities) · Open Targets · OLS4 (HPO) · Human Phenotype Ontology.</li>
+</ul>
+
+<p style="text-align:center;color:#95a5a6;font-size:12px;margin-top:32px">
+raredx · scientific documentation · github.com/julianig72/raredx</p>
+</body></html>
