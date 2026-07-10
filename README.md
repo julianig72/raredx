@@ -92,7 +92,8 @@ Sobre un VCF clínico real (varón, 10 meses, epilepsia; GRCh37/hg19; 1730 varia
 p.Cys1376Arg** (síndrome de Dravet). Aquí las capas de IA se complementan: **ESM-2 8M la marcó
 tolerada por error (LLR +0.08), pero AlphaMissense la clasificó correctamente como probablemente
 patogénica (0.999)**, en concordancia con SIFT/PolyPhen, la ausencia en gnomAD y el criterio PM5
-(el codón Cys1376 ya tiene variantes patogénicas en ClinVar). Es la ilustración de por qué no se
+(el codón Cys1376 ya alberga en ClinVar la variante C1376Y *patogénica* y C1376S *probablemente
+patogénica* — verificado vía ClinVar E-utilities; el cambio del paciente, C1376R, es distinto y aún no reportado). Es la ilustración de por qué no se
 usa un único predictor: AlphaMissense corrige el punto débil de ESM-2 8M en casos límite.
 
 ## Uso completo
