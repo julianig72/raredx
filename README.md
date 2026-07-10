@@ -70,8 +70,8 @@ python raredx_pipeline.py input.vcf --alphamissense --assembly GRCh37 --hpo "HP:
 ```
 
 ### IA-4 - Capa agéntica: autorreflexión + diagnóstico diferencial trazable
-Inspirada en **DeepRare** (Zhao et al., *Nature* 2025, "An agentic system for rare disease
-diagnosis with traceable reasoning"). En lugar de entregar solo una lista rankeada de variantes,
+Inspirada en **DeepRare** ("An agentic system for rare disease diagnosis with traceable
+reasoning", *Nature* 2025, [doi:10.1038/s41586-025-10097-9](https://doi.org/10.1038/s41586-025-10097-9)). En lugar de entregar solo una lista rankeada de variantes,
 un LLM **razona sobre su propia salida** en tres pasos:
 
 1. **Autorreflexión.** Revisa cada candidato del top-K frente al fenotipo del paciente y al
