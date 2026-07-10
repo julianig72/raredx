@@ -45,7 +45,7 @@ def _set(job_id, **kw):
     with JOBS_LOCK:
         JOBS.setdefault(job_id, {}).update(kw)
 
-def _run_job(job_id, vcf_path, sample, hpo, note, assembly, use_esm, use_am):
+def _run_job(job_id, vcf_path, sample, hpo, note, assembly, use_esm, use_am, use_agentic):
     outdir = DATA_DIR / job_id
     prefix = str(outdir / "result")
     try:
@@ -54,7 +54,7 @@ def _run_job(job_id, vcf_path, sample, hpo, note, assembly, use_esm, use_am):
         _set(job_id, status="running", done=0, total=0, message="Iniciando…")
         result = rx.run_pipeline(
             vcf_path, sample=sample, hpo=hpo, clinical_note_text=note or None,
-            assembly=assembly, use_esm=use_esm, use_am=use_am,
+            assembly=assembly, use_esm=use_esm, use_am=use_am, agentic=use_agentic,
             email=CONTACT_EMAIL, progress=progress,
         )
         rx.write_outputs(result, prefix)
@@ -64,8 +64,15 @@ def _run_job(job_id, vcf_path, sample, hpo, note, assembly, use_esm, use_am):
                                    "call","combined","am_pathogenicity","esm2_llr","acmg_tags")}
             for v in variants[:15]
         ]
+        # surface the agentic differential (disease-level hypotheses) to the UI, if computed
+        ag = result.get("agentic") or {}
+        differential = [
+            {k: d.get(k) for k in ("disease","genes","inheritance","likelihood",
+                                   "supporting_variants","rationale","evidence","next_steps")}
+            for d in ag.get("differential", [])
+        ]
         _set(job_id, status="done", message="Análisis completo",
-             n_variants=len(variants), top=top,
+             n_variants=len(variants), top=top, differential=differential,
              report=f"{prefix}_report.html", csv=f"{prefix}_annotated.csv")
     except Exception as e:
         _set(job_id, status="error", message=str(e), error=traceback.format_exc())
@@ -79,6 +86,7 @@ async def analyze(
     assembly: str = Form("GRCh38"),
     esm: str = Form("false"),
     alphamissense: str = Form("false"),
+    agentic: str = Form("false"),
 ):
     if assembly not in ("GRCh38", "GRCh37"):
         raise HTTPException(400, "assembly must be GRCh38 or GRCh37")
@@ -104,7 +112,8 @@ async def analyze(
     t = threading.Thread(
         target=_run_job,
         args=(job_id, str(vcf_path), sample, hpo, clinical_note, assembly,
-              esm.lower() == "true", alphamissense.lower() == "true"),
+              esm.lower() == "true", alphamissense.lower() == "true",
+              agentic.lower() == "true"),
         daemon=True,
     )
     t.start()
@@ -121,6 +130,7 @@ def status(job_id: str):
         "status": j.get("status"), "message": j.get("message"), "percent": pct,
         "done": j.get("done", 0), "total": j.get("total", 0),
         "n_variants": j.get("n_variants"), "top": j.get("top"),
+        "differential": j.get("differential"),
         "has_report": bool(j.get("report")), "has_csv": bool(j.get("csv")),
     })
 
