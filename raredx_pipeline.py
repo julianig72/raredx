@@ -430,7 +430,7 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
         anthropic_key: key for the clinical-note LLM layer (else ANTHROPIC_API_KEY env).
         progress: optional callable(done:int, total:int, message:str) for live status.
 
-    Returns dict: {variants, patient_hpo, csv_cols, n_input}. Pass the result to
+    Returns dict: {variants, patient_hpo, csv_cols, n_input, assembly}. Pass the result to
     write_outputs(result, prefix) to emit <prefix>_annotated.csv and <prefix>_report.html.
     """
     def _prog(done, total, msg):
