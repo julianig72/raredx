@@ -1,0 +1,212 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8">
+<title>raredx · Documentación completa</title>
+<style>
+ body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:960px;margin:auto;padding:32px 28px;background:#f5f6fa;color:#2c3e50;line-height:1.6}
+ header{background:#1e2a38;color:#fff;padding:26px 30px;border-radius:12px;margin-bottom:20px}
+ header h1{margin:0;font-size:26px} header .sub{color:#9fb3c8;font-size:14px;margin-top:6px}
+ h2{font-size:19px;color:#1e2a38;border-bottom:2px solid #e4e9ef;padding-bottom:6px;margin-top:34px}
+ h3{font-size:15.5px;color:#34495e;margin-top:22px}
+ code{background:#eef1f5;padding:1px 6px;border-radius:4px;font-size:13px;color:#c0392b}
+ pre{background:#1e2a38;color:#e6edf3;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:12.5px;line-height:1.45}
+ pre code{background:none;color:inherit;padding:0}
+ table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;font-size:13px;margin:12px 0}
+ th{background:#eef1f5;text-align:left;padding:9px;font-size:11px;text-transform:uppercase;color:#7f8c8d}
+ td{padding:8px 9px;border-top:1px solid #eef1f5;vertical-align:top}
+ .card{background:#fff;border-radius:10px;padding:18px 22px;margin:14px 0;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+ .ai{border-left:4px solid #8e44ad} .step{border-left:4px solid #16a085}
+ .flow{background:#1e2a38;color:#e6edf3;border-radius:10px;padding:18px 22px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;white-space:pre;overflow-x:auto;line-height:1.5}
+ .warn{background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:14px 18px;color:#795548;font-size:13px;margin:18px 0}
+ .tag{display:inline-block;background:#f3eafc;color:#6c3483;border-radius:12px;padding:2px 10px;font-size:11px;font-weight:600;margin:2px}
+ a{color:#2980b9}
+ .toc{background:#fff;border-radius:10px;padding:16px 22px;font-size:13.5px} .toc a{text-decoration:none}
+ .toc li{margin:3px 0}
+</style></head><body>
+
+<header>
+ <h1>raredx — Documentación completa</h1>
+ <div class="sub">Análisis de VCF asistido por IA para diagnóstico de enfermedades raras · apoyo a la decisión clínica · 2026-07-10</div>
+</header>
+
+<div class="toc">
+<b>Contenido</b>
+<ol>
+ <li><a href="#que">Qué es y qué hace</a></li>
+ <li><a href="#arq">Arquitectura general</a></li>
+ <li><a href="#motor">Motor de variante (ACMG-lite)</a></li>
+ <li><a href="#feno">Motor de fenotipo (HPO)</a></li>
+ <li><a href="#ia">Las cuatro capas de IA</a></li>
+ <li><a href="#agentic">Capa agéntica en detalle</a></li>
+ <li><a href="#uso">Cómo usarlo — CLI y web</a></li>
+ <li><a href="#caso">Caso real validado (epilepsia)</a></li>
+ <li><a href="#lim">Límites y notas clínicas</a></li>
+</ol>
+</div>
+
+<h2 id="que">1 · Qué es y qué hace</h2>
+<div class="card">
+raredx toma un <b>VCF</b> (variantes de un paciente) y, opcionalmente, su <b>fenotipo</b> (nota clínica en
+texto libre o términos HPO), y devuelve una <b>lista priorizada de variantes candidatas</b> más un
+<b>diagnóstico diferencial a nivel de enfermedad</b> con razonamiento trazable. Combina
+<b>cuatro capas de evidencia clásica</b> (consecuencia funcional, frecuencia poblacional, restricción
+génica, significancia clínica) con <b>cuatro capas de IA</b>. Soporta <b>GRCh38 y GRCh37/hg19</b>.
+Todo el análisis se apoya en APIs REST en vivo (sin descargar bases de datos de gigabytes).
+</div>
+
+<h2 id="arq">2 · Arquitectura general</h2>
+<div class="flow">  Nota clínica (texto libre)
+        │  [IA-1] LLM extrae fenotipos → OLS4 los normaliza a HPO
+        ▼
+  Perfil HPO del paciente ───────────────┐
+                                          │   MOTOR DE FENOTIPO
+  VCF → anotación por variante            │   gen→enfermedad→HPO (Open Targets)
+        │- Ensembl VEP (consecuencia)     │   + expansión ontológica
+        │- gnomAD r4 (frecuencia, pLI)    │   → pheno_score
+        │- ClinVar (significancia, ★)     │
+        │- [IA-2] ESM-2 (missense LLR)    │
+        │- [IA-3] AlphaMissense (0–1)     │
+        └→ MOTOR DE VARIANTE (ACMG-lite)  │
+              → variant_score ────────────┘
+                          ▼
+          combined = 0.55·variante + 0.45·fenotipo
+                          ▼
+              Ranking de variantes
+                          ▼
+   [IA-4] CAPA AGÉNTICA (estilo DeepRare)
+   autorreflexión (fenotipo + herencia/cigosidad)
+   → diferencial de ENFERMEDADES + enlaces verificados
+                          ▼
+          Informe HTML + CSV</div>
+<p>Tres piezas de código: <code>raredx_pipeline.py</code> (motor, reutilizable por CLI y web),
+<code>web/server.py</code> (backend FastAPI) y <code>web/static/index.html</code> (interfaz del clínico).
+La web y la CLI llaman a la <b>misma</b> función <code>run_pipeline()</code>, así que producen resultados idénticos.</p>
+
+<h2 id="motor">3 · Motor de variante (ACMG-lite)</h2>
+<p>Para cada variante se reúnen cinco fuentes y se aplica un motor de reglas inspirado en ACMG/AMP:</p>
+<table>
+<thead><tr><th>Capa</th><th>Fuente</th><th>Qué aporta</th><th>Regla ACMG</th></tr></thead>
+<tbody>
+<tr><td>Consecuencia funcional</td><td>Ensembl VEP</td><td>missense / stop / frameshift / splice + SIFT/PolyPhen</td><td>PVS1 (LoF)</td></tr>
+<tr><td>Frecuencia poblacional</td><td>gnomAD r4</td><td>AF; común ⇒ benigna</td><td>BA1 (≥5%), BS1 (≥1%), PM2 (ausente)</td></tr>
+<tr><td>Restricción génica</td><td>gnomAD</td><td>pLI, LOEUF</td><td>PVS1 en genes intolerantes a LoF</td></tr>
+<tr><td>Significancia clínica</td><td>ClinVar (E-utilities)</td><td>veredicto + estrellas de oro</td><td>PP5 / BP6</td></tr>
+<tr><td><b>IA missense</b></td><td><b>ESM-2 + AlphaMissense</b></td><td><b>patogenicidad in-silico</b></td><td><b>PP3 / BP4</b></td></tr>
+</tbody></table>
+<p>El resultado es una <b>clasificación de 5 niveles</b> (Patogénica / Probablemente patogénica / VUS /
+Probablemente benigna / Benigna) y un <code>variant_score</code> normalizado a 0–1.</p>
+
+<h2 id="feno">4 · Motor de fenotipo (HPO)</h2>
+<p>Si se aportan fenotipos, se convierten a términos HPO oficiales y se cruzan con cada gen candidato:
+para cada gen se recupera su cadena <b>gen → enfermedad → HPO</b> desde <b>Open Targets</b>, se expande
+ontológicamente (ancestros HPO) y se calcula un <code>pheno_score</code> por solapamiento con el perfil
+del paciente. El score combinado prioriza así variantes que <b>encajan con la clínica</b>, al estilo de
+Exomiser: <code>combined = 0.55·variant_score + 0.45·pheno_score</code> (con penalización ×0.5 si la
+variante falla el control de calidad del VCF).</p>
+
+<h2 id="ia">5 · Las cuatro capas de IA</h2>
+
+<div class="card ai"><h3>IA-1 · Extracción de fenotipo HPO desde nota clínica (LLM)</h3>
+En vez de introducir códigos HPO a mano, se pega la <b>nota clínica en lenguaje natural</b> y un LLM extrae
+los fenotipos presentes, que OLS4 aterriza a términos HPO oficiales. Captura signos sutiles:
+<i>"el niño sabe salado"</i> → <span class="tag">HP:0012236 Cloruro en sudor elevado</span>,
+<i>"acropaquias"</i> → <span class="tag">HP:0100759 Dedos en palillo de tambor</span>.</div>
+
+<div class="card ai"><h3>IA-2 · Patogenicidad de missense con ESM-2 (Meta AI)</h3>
+Modelo de lenguaje de proteínas que puntúa cada cambio de aminoácido por su <b>verosimilitud evolutiva</b>
+(masked-marginal log-likelihood ratio, LLR). LLR muy negativo ⇒ mutación improbable ⇒ probablemente
+deletérea. Es el principio detrás de AlphaMissense. Corre en CPU con el modelo 8M (prueba de concepto);
+para uso serio, 650M/3B en GPU.</div>
+
+<div class="card ai"><h3>IA-3 · Patogenicidad de missense con AlphaMissense (DeepMind)</h3>
+Predictor calibrado clínicamente que clasifica cada missense como
+<span class="tag">likely_pathogenic</span> / <span class="tag">ambiguous</span> /
+<span class="tag">likely_benign</span> (0–1). DeepMind no liberó el modelo ejecutable, solo ~71 M scores
+precalculados; se consultan vía <b>Ensembl VEP</b> (<code>AlphaMissense=1</code>). Como es solo GRCh38, un VCF
+GRCh37 se <b>lifta a GRCh38</b> por variante. <b>No requiere GPU ni descargar pesos.</b> Pesa algo más que
+ESM-2 8M por ser un predictor clínico especializado.</div>
+
+<div class="card ai"><h3>IA-4 · Capa agéntica: autorreflexión + diferencial trazable</h3>
+Inspirada en <b>DeepRare</b> (<i>Nature</i> 2025, <a href="https://doi.org/10.1038/s41586-025-10097-9">doi:10.1038/s41586-025-10097-9</a>).
+En lugar de entregar solo una lista rankeada, un LLM <b>razona sobre su propia salida</b>. Se detalla en la
+sección 6.</div>
+
+<h2 id="agentic">6 · Capa agéntica en detalle</h2>
+<div class="card step"><b>Paso 1 · Autorreflexión.</b> El LLM revisa cada candidato del top-K frente al
+fenotipo del paciente y al <b>patrón de herencia vs. la cigosidad observada</b>, emitiendo un veredicto
+<span class="tag">support</span> / <span class="tag">uncertain</span> / <span class="tag">refute</span>
+con razonamiento. Detecta incoherencias que un ranking numérico no ve — p. ej. <i>una variante heterocigota
+única en un gen recesivo sin segundo golpe es un portador, no la causa</i>; <i>una llamada ligada al X
+heterocigota/homocigota en un varón es sospechosa</i>. Si <b>todos</b> se descartan, amplía la ventana de
+búsqueda (K += paso) y reitera — el análogo fiel al bucle de DeepRare que aumenta la profundidad N.</div>
+
+<div class="card step"><b>Paso 2 · Síntesis del diferencial.</b> Agrupa las variantes que sobreviven en
+<b>hipótesis a nivel de enfermedad</b> (enfermedad, gen(es), variante(s), herencia, razonamiento), ordenadas
+por verosimilitud (alta / moderada / baja) y con un siguiente paso sugerido.</div>
+
+<div class="card step"><b>Paso 3 · Verificación de enlaces (anti-alucinación).</b> Cada cita usa solo URLs
+<b>pre-construidas de forma determinista</b> (ClinVar, OMIM, Open Targets, Ensembl, PubMed) y se
+<b>comprueba que cada enlace resuelve</b> (HTTP &lt; 400) antes de incluirlo. El LLM nunca inventa enlaces —
+el mismo mecanismo de trazabilidad de DeepRare.</div>
+
+<p><b>Alcance configurable:</b> por defecto la autorreflexión evalúa el top-K (<code>start_k=8</code>) y solo
+profundiza si descarta todo. Los candidatos anotados fuera de esa ventana no son razonados por el LLM
+(el CSV marca cada fila con <code>agentic_evaluated</code> = yes/no).</p>
+
+<h2 id="uso">7 · Cómo usarlo</h2>
+<h3>Línea de comandos</h3>
+<pre><code>python raredx_pipeline.py paciente.vcf \
+       --assembly GRCh37 \              # build del VCF (GRCh38 por defecto)
+       --clinical-note nota.txt \       # IA-1: HPO desde texto (o --hpo "HP:0001250,...")
+       --esm \                          # IA-2: ESM-2 en missense (necesita torch)
+       --alphamissense \                # IA-3: AlphaMissense (sin GPU)
+       --agentic \                      # IA-4: autorreflexión + diferencial trazable (LLM)
+       --out-prefix salida/paciente \
+       --email tu@institucion.org</code></pre>
+<p><b>Dependencias:</b> <code>requests</code> (base); <code>torch fair-esm</code> (para <code>--esm</code>);
+<code>anthropic</code> + <code>ANTHROPIC_API_KEY</code> (para <code>--clinical-note</code> y <code>--agentic</code>).
+<code>--alphamissense</code> no requiere dependencias extra ni GPU. La capa <code>--agentic</code> degrada con
+elegancia: sin LLM disponible, el análisis se completa igual y el diferencial queda vacío.</p>
+
+<h3>Herramienta web (para clínicos)</h3>
+<pre><code>docker build -f web/Dockerfile -t raredx-web .
+docker run -p 8000:8000 -v raredx_data:/data raredx-web
+# abrir http://localhost:8000</code></pre>
+<p>El clínico sube el VCF, pega la nota clínica y/o los HPO, elige el ensamblaje y las capas de IA, y
+obtiene el diferencial + informe HTML + CSV descargables. El backend procesa en segundo plano con
+progreso en vivo.</p>
+
+<h2 id="caso">8 · Caso real validado (epilepsia infantil)</h2>
+<p>Sobre un VCF clínico real (varón, 10 meses, epilepsia; GRCh37; 1730 variantes → 871 PASS únicas →
+42 raras/impactantes → 16 en genes de epilepsia), el pipeline completo — con la capa agéntica —
+produjo este diferencial:</p>
+<table>
+<thead><tr><th>#</th><th>Enfermedad</th><th>Gen</th><th>Herencia</th><th>Verosimilitud</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Encefalopatía epiléptica infantil precoz 6 / <b>Síndrome de Dravet</b></td><td><b>SCN1A</b> p.Cys1376Arg</td><td>AD</td><td style="color:#c0392b;font-weight:700">ALTA</td></tr>
+<tr><td>2</td><td>Encefalopatía epiléptica infantil precoz 13</td><td>SCN8A</td><td>AD</td><td style="color:#e67e22">moderada</td></tr>
+<tr><td>3–4</td><td>Ataxia episódica / crisis (CACNA1A, KCNA1)</td><td>CACNA1A, KCNA1</td><td>AD</td><td style="color:#7f8c8d">baja</td></tr>
+</tbody></table>
+<p>La autorreflexión <b>corrigió el ranking crudo</b>: PNKP (que salía #1 por score) fue descartado por ser
+recesivo con una sola variante heterocigota (portador, no causa); GFAP (stop-gained benigno) y GRIA3
+(X-linked incoherente en varón) también fueron refutados. <b>SCN1A</b> emergió como hipótesis principal:
+AlphaMissense 0.999 (ESM-2 8M la marcó tolerada — corregido por AlphaMissense), ausente en gnomAD,
+criterio PM5 (el codón Cys1376 ya alberga C1376Y patogénica y C1376S probablemente patogénica en ClinVar).</p>
+
+<div class="warn"><b>Sistema de apoyo a la decisión, no un diagnóstico.</b> Todo hallazgo debe confirmarse
+por método ortogonal (Sanger) e interpretarse por un genetista clínico con el contexto completo del
+paciente. SCN1A p.Cys1376Arg es una variante novel; su confirmación idealmente requiere estudio de
+tríos para demostrar origen <i>de novo</i> (criterio PS2). Además, verificar la identidad de la muestra
+antes de cualquier uso clínico.</div>
+
+<h2 id="lim">9 · Límites y notas</h2>
+<ul>
+<li><b>Requiere internet:</b> todo el análisis usa APIs REST en vivo (Ensembl, gnomAD, ClinVar, Open Targets, OLS4).</li>
+<li><b>SNV e indels pequeños:</b> no cubre CNV, expansiones de repeticiones ni variantes estructurales.</li>
+<li><b>ESM-2 8M</b> es prueba de concepto (puede fallar en casos límite — por eso AlphaMissense lo complementa).</li>
+<li><b>Sin autenticación</b> en el servidor de desarrollo: para uso clínico, ponerlo tras proxy con OAuth2/OIDC + TLS y una política de borrado de datos (RGPD/HIPAA).</li>
+<li><b>No sustituye</b> a un análisis de tríos ni al juicio de un genetista clínico.</li>
+</ul>
+
+<p style="text-align:center;color:#95a5a6;font-size:12px;margin-top:30px">
+raredx · Ensembl VEP · gnomAD · ClinVar · Open Targets · OLS4 · ESM-2 · AlphaMissense · HPO · LLM agéntico<br>
+Repositorio: github.com/julianig72/raredx</p>
+</body></html>
