@@ -88,6 +88,20 @@ método ortogonal (Sanger) y ser interpretado por un genetista clínico con el c
   <div class="toggles">
     <span class="tog"><input type="checkbox" id="agentic"><label style="margin:0">Diagnóstico diferencial + autorreflexión <span class="h">(LLM; revisa candidatos vs. fenotipo/herencia y sintetiza un diferencial trazable con enlaces verificados)</span></label></span>
   </div>
+  <div id="reflectkwrap" style="display:none;margin-top:6px">
+    <label style="font-size:13px">Candidatos a revisar por la IA (top-K)
+      <input type="number" id="reflectk" value="8" min="1" max="50" style="width:70px;margin-left:8px">
+      <span class="h">— la ventana se amplía sola si todos se descartan</span>
+    </label>
+  </div>
+
+  <label>Análisis de trío <span class="h">— opcional, detecta variantes <i>de novo</i> (criterio ACMG PS2)</span></label>
+  <div style="display:flex;gap:12px;flex-wrap:wrap">
+    <label style="font-size:13px;flex:1;min-width:180px">VCF del padre
+      <input type="file" id="father" accept=".vcf,.txt" style="display:block;margin-top:4px;font-size:12px"></label>
+    <label style="font-size:13px;flex:1;min-width:180px">VCF de la madre
+      <input type="file" id="mother" accept=".vcf,.txt" style="display:block;margin-top:4px;font-size:12px"></label>
+  </div>
 
   <button class="go" id="go">Analizar VCF</button>
 
@@ -119,6 +133,9 @@ método ortogonal (Sanger) y ser interpretado por un genetista clínico con el c
 
 <script>
 const $ = id => document.getElementById(id);
+$('agentic').addEventListener('change', e => {
+  $('reflectkwrap').style.display = e.target.checked ? 'block' : 'none';
+});
 let file = null;
 
 const drop = $('drop');
@@ -143,6 +160,9 @@ $('go').onclick = async () => {
   fd.append('esm', $('esm').checked);
   fd.append('alphamissense', $('am').checked);
   fd.append('agentic', $('agentic').checked);
+  fd.append('reflect_k', $('reflectk').value || '8');
+  if ($('father').files[0]) fd.append('father', $('father').files[0]);
+  if ($('mother').files[0]) fd.append('mother', $('mother').files[0]);
 
   let job;
   try {
