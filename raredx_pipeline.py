@@ -453,6 +453,73 @@ def _zygosity(v):
     if gt in ("0/1","1/0","0/2","1/2"): return "heterozygous"
     return gt or "unknown"
 
+def _gt_alleles(sample):
+    """Return the set of allele indices in a genotype call, or None if missing/uncalled."""
+    gt = (sample or {}).get("GT")
+    if not gt or gt in (".", "./.", ".|."): return None
+    parts = gt.replace("|", "/").split("/")
+    try:
+        return {int(p) for p in parts if p != "."}
+    except ValueError:
+        return None
+
+def _has_alt(sample):
+    """True if the genotype carries the alt allele (any index >= 1)."""
+    al = _gt_alleles(sample)
+    return bool(al and any(a >= 1 for a in al))
+
+def trio_inheritance(variants, father_vcf=None, mother_vcf=None, progress=None):
+    """Classify the inheritance of each candidate variant against parental genotypes.
+
+    For each proband variant, look up the same (chrom,pos,ref,alt) in each parent's VCF and
+    assign an inheritance mode. A *de novo* call (alt present in the child, absent in both
+    parents, with both parents genotyped) adds the ACMG PS2 supporting-strong criterion.
+
+    Returns the number of variants annotated. Sets per-variant keys:
+      inheritance      one of: de_novo, paternal, maternal, biparental, homozygous_recessive,
+                       absent_in_parents (incomplete), or "" if no parental data
+      father_gt/mother_gt   the parental genotype strings (or 'absent' / 'NA')
+    """
+    if not father_vcf and not mother_vcf:
+        return 0
+    def _index(path):
+        idx = {}
+        if not path: return None
+        for r in parse_vcf(path):
+            idx[(r["chrom"], r["pos"], r["ref"], r["alt"])] = r.get("sample") or {}
+        return idx
+    fidx = _index(father_vcf); midx = _index(mother_vcf)
+    if progress:
+        try: progress(0, 0, "Analizando herencia (trío)…")
+        except Exception: pass
+    n = 0
+    for v in variants:
+        key = (v["chrom"], v["pos"], v["ref"], v["alt"])
+        fs = fidx.get(key) if fidx is not None else None
+        ms = midx.get(key) if midx is not None else None
+        f_alt = _has_alt(fs) if fs is not None else None
+        m_alt = _has_alt(ms) if ms is not None else None
+        v["father_gt"] = (fs or {}).get("GT", "absent" if fidx is not None else "NA")
+        v["mother_gt"] = (ms or {}).get("GT", "absent" if midx is not None else "NA")
+        child_hom = _zygosity(v) == "homozygous"
+        both_typed = fidx is not None and midx is not None
+        inh = ""
+        if both_typed:
+            if not f_alt and not m_alt:
+                inh = "de_novo"
+            elif f_alt and m_alt:
+                inh = "homozygous_recessive" if child_hom else "biparental"
+            elif f_alt:
+                inh = "paternal"
+            elif m_alt:
+                inh = "maternal"
+        else:  # only one parent available — partial call
+            present = (f_alt if fidx is not None else m_alt)
+            inh = ("paternal" if fidx is not None else "maternal") if present else "absent_in_parents"
+        v["inheritance"] = inh
+        n += 1
+    return n
+
 def agentic_diagnosis(variants, patient_hpo, api_key=None, sample="", progress=None,
                       start_k=8, relax_step=8, max_rounds=3):
     """DeepRare-style agentic layer over the ranked variant list:
@@ -613,13 +680,24 @@ def write_html(variants, patient_hpo, prefix, assembly="GRCh38", agentic=None):
             parts.append(f'<span style="color:{ec}" title="ESM-2 LLR">ESM {float(llr):.1f}</span>')
         return " ".join(parts) or "—"
     chips="".join(f'<span class="hpo">{html.escape(t["label"])} <code>{t["hpo_id"]}</code></span>' for t in patient_hpo)
+    has_trio=any(v.get("inheritance") for v in variants)
+    INH_LABEL={"de_novo":"de novo","paternal":"paterna","maternal":"materna","biparental":"biparental",
+               "homozygous_recessive":"hom. recesiva","absent_in_parents":"ausente en padres"}
+    def inh_cell(v):
+        inh=v.get("inheritance") or ""
+        if not inh: return "<td>—</td>"
+        color="#c0392b" if inh=="de_novo" else ("#16a085" if inh=="homozygous_recessive" else "#34495e")
+        wt=";font-weight:700" if inh=="de_novo" else ""
+        return f'<td style="color:{color}{wt}">{INH_LABEL.get(inh,inh)}</td>'
     rows="".join(f'<tr><td>{v["rank"]}</td><td><b>{html.escape(v.get("gene") or "")}</b></td>'
                  f'<td>{v["chrom"]}:{v["pos"]} {html.escape(v["ref"])}>{html.escape(v["alt"])}</td>'
                  f'<td>{faf(v.get("af"))}</td><td>{html.escape(str(v.get("clinvar") or ""))} {"*"*int(v.get("stars") or 0)}</td>'
                  f'<td>{ai_cell(v)}</td>'
                  f'<td style="color:{col(v["call"])};font-weight:600">{html.escape(tier(v["call"]))}</td>'
-                 f'<td>{v.get("variant_score",0):.2f}</td><td style="color:#8e44ad">{v.get("pheno_score",0):.2f}</td>'
+                 + (inh_cell(v) if has_trio else "")
+                 + f'<td>{v.get("variant_score",0):.2f}</td><td style="color:#8e44ad">{v.get("pheno_score",0):.2f}</td>'
                  f'<td><b>{v.get("combined",0):.2f}</b></td><td>{v.get("filter")}</td></tr>' for v in variants)
+    inh_th="<th>Herencia</th>" if has_trio else ""
     now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     doc=f"""<!doctype html><html lang="es"><head><meta charset="utf-8"><title>raredx report</title>
 <style>body{{font-family:-apple-system,Segoe UI,sans-serif;max-width:1040px;margin:auto;padding:24px;background:#f5f6fa;color:#2c3e50}}
@@ -634,7 +712,7 @@ td{{padding:7px 8px;border-top:1px solid #eef1f5}} .note{{background:#fff8e1;bor
 <div class="hpobar"><b>Perfil HPO del paciente ({len(patient_hpo)}):</b><br>{chips or "(ninguno - solo ranking por variante)"}</div>
 {_differential_html(agentic)}
 <h2 style="font-size:14px;color:#1e2a38;margin:18px 0 4px">Variantes candidatas priorizadas</h2>
-<table><thead><tr><th>#</th><th>Gen</th><th>Variante</th><th>gnomAD</th><th>ClinVar</th><th>IA</th><th>Clase</th><th>Var</th><th>Feno</th><th>Comb</th><th>QC</th></tr></thead>
+<table><thead><tr><th>#</th><th>Gen</th><th>Variante</th><th>gnomAD</th><th>ClinVar</th><th>IA</th><th>Clase</th>{inh_th}<th>Var</th><th>Feno</th><th>Comb</th><th>QC</th></tr></thead>
 <tbody>{rows}</tbody></table>
 <div class="note"><b>Sistema de apoyo a la decision, no diagnostico.</b> VEP + gnomAD + ClinVar (score de variante ACMG-lite) x fenotipos HPO de Open Targets (score fenotipico). Confirmar por metodo ortogonal e interpretar en contexto clinico.</div>
 </body></html>"""
@@ -645,10 +723,12 @@ CSV_COLS=["rank","gene","rsid","chrom","pos","ref","alt","consequence","protein"
           "clinvar","stars","pli","loeuf","sift","polyphen","call","variant_score",
           "pheno_score","pheno_direct","pheno_disease","pheno_shared","combined","filter",
           "acmg_tags","esm2_llr","esm2_call","am_pathogenicity","am_call",
-          "agentic_evaluated","reflect_verdict"]
+          "agentic_evaluated","reflect_verdict","inheritance","father_gt","mother_gt"]
 
 def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, assembly="GRCh38",
-                 use_esm=False, use_am=False, agentic=False, email=None, anthropic_key=None, progress=None):
+                 use_esm=False, use_am=False, agentic=False, reflect_k=8,
+                 father_vcf=None, mother_vcf=None, email=None,
+                 anthropic_key=None, progress=None):
     """Annotate a VCF and prioritize variants. Reusable entry point for CLI and web server.
 
     Args:
@@ -729,6 +809,16 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
         if i % 10 == 0 or i == len(variants):
             _prog(i, len(variants), f"Anotando variantes: {i}/{len(variants)}")
 
+    # trio inheritance (optional) — assigns v["inheritance"]; de novo adds PS2 (supporting strong)
+    if father_vcf or mother_vcf:
+        n_trio=trio_inheritance(variants, father_vcf, mother_vcf, progress)
+        for v in variants:
+            if v.get("inheritance")=="de_novo":
+                v["_raw"]=v.get("_raw",0)+30  # PS2 bonus
+                v["acmg_tags"]=(v.get("acmg_tags","")+(",PS2" if v.get("acmg_tags") else "PS2"))
+                v["evidence"]=(v.get("evidence","")+"; PS2: de novo (absent in both genotyped parents)").lstrip("; ")
+        _prog(len(variants), len(variants), f"Herencia analizada en {n_trio} variantes")
+
     raws=[v["_raw"] for v in variants] or [0]; lo,hi=min(raws),max(raws)
     for v in variants:
         vs=round((v["_raw"]-lo)/(hi-lo),3) if hi>lo else 0.5
@@ -748,7 +838,7 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
     agentic_result=None
     if agentic:
         agentic_result=agentic_diagnosis(variants, patient_hpo, api_key=anthropic_key,
-                                          sample=sample, progress=progress)
+                                          sample=sample, progress=progress, start_k=reflect_k)
         # flag which rows the LLM self-reflection actually examined (only the top-K window)
         for v in variants:
             v["agentic_evaluated"]="yes" if v.get("reflect_verdict") else "no"
@@ -777,6 +867,9 @@ def main():
     ap.add_argument("--assembly", default="GRCh38", choices=["GRCh38","GRCh37"], help="Genome build of the input VCF (AlphaMissense lifts GRCh37->GRCh38)")
     ap.add_argument("--clinical-note", default=None, help="Path to free-text clinical note; extracts HPO via LLM (needs ANTHROPIC_API_KEY)")
     ap.add_argument("--agentic", action="store_true", help="Agentic layer: LLM self-reflection over candidates + traceable differential diagnosis with link verification (needs ANTHROPIC_API_KEY)")
+    ap.add_argument("--reflect-k", type=int, default=8, help="Agentic layer: number of top candidates the LLM self-reflection examines (default 8; window widens only if all are refuted)")
+    ap.add_argument("--father", default=None, help="Father VCF for trio analysis (de novo detection → ACMG PS2)")
+    ap.add_argument("--mother", default=None, help="Mother VCF for trio analysis (de novo detection → ACMG PS2)")
     ap.add_argument("--anthropic-key", default=None, help="Anthropic API key (else uses ANTHROPIC_API_KEY env)")
     a=ap.parse_args()
 
@@ -787,7 +880,9 @@ def main():
     def cli_progress(done, total, msg): print(f"[raredx] {msg}", file=sys.stderr)
     result=run_pipeline(a.vcf, sample=a.sample, hpo=hpo_arg, clinical_note_text=note,
                         assembly=a.assembly, use_esm=a.esm, use_am=a.alphamissense,
-                        agentic=a.agentic, email=a.email, anthropic_key=a.anthropic_key, progress=cli_progress)
+                        agentic=a.agentic, reflect_k=a.reflect_k,
+                        father_vcf=a.father, mother_vcf=a.mother, email=a.email,
+                        anthropic_key=a.anthropic_key, progress=cli_progress)
     write_outputs(result, a.out_prefix)
     print(f"[raredx] wrote {a.out_prefix}_annotated.csv and {a.out_prefix}_report.html", file=sys.stderr)
 
