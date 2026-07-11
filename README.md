@@ -8,6 +8,16 @@ priorización dirigida por fenotipo al estilo de Exomiser. Soporta **GRCh38 y GR
 Todo el análisis se apoya en **APIs REST públicas en vivo** (Ensembl, gnomAD, ClinVar, Open
 Targets, OLS4): no hay que descargar bases de datos de gigabytes ni mantener índices locales.
 
+## Documentación
+
+Documentación científica detallada del pipeline (fuentes de datos, reglas ACMG con umbrales
+exactos, predictores de IA, fórmulas de puntuación y capa agéntica):
+
+- 📄 [Documentación científica (español)](docs/raredx_documentacion.html)
+- 📄 [Scientific documentation (English)](docs/documentation_en.html)
+
+Guía de despliegue de la herramienta web: [`web/README.md`](web/README.md).
+
 ## Instalación
 
 Requiere **Python 3.10+**. La única dependencia obligatoria es `requests`; las capas de IA
@@ -184,9 +194,18 @@ python raredx_pipeline.py input.vcf \
        --esm \                          # IA-2: ESM-2 en missense
        --alphamissense \                # IA-3: AlphaMissense en missense (sin GPU)
        --agentic \                      # IA-4: autorreflexión + diferencial trazable (LLM)
+       --reflect-k 12 \                 # nº de candidatos que revisa la IA (por defecto 8)
+       --father padre.vcf \             # trío: detecta de novo → criterio ACMG PS2
+       --mother madre.vcf \             # trío: VCF de la madre
        --out-prefix salida/paciente \
        --email tu@institucion.org
 ```
+
+**Análisis de trío (opcional).** Si se aportan los VCF de los progenitores (`--father`/`--mother`),
+cada variante candidata se clasifica por herencia buscando el mismo alelo en los padres:
+`de_novo` (ausente en ambos progenitores genotipados → añade el criterio ACMG **PS2**),
+`paterna`/`materna`, `biparental` u `homozygous_recessive`. Las columnas `inheritance`,
+`father_gt` y `mother_gt` se añaden al CSV, y el informe muestra una columna "Herencia".
 
 **Dependencias:** `requests` (base); `torch fair-esm` (para `--esm`); `anthropic` +
 `ANTHROPIC_API_KEY` (para `--clinical-note` y `--agentic`). `--alphamissense` **no requiere
