@@ -45,7 +45,8 @@ def _set(job_id, **kw):
     with JOBS_LOCK:
         JOBS.setdefault(job_id, {}).update(kw)
 
-def _run_job(job_id, vcf_path, sample, hpo, note, assembly, use_esm, use_am, use_agentic):
+def _run_job(job_id, vcf_path, sample, hpo, note, assembly, use_esm, use_am, use_agentic, reflect_k,
+             father_vcf=None, mother_vcf=None):
     outdir = DATA_DIR / job_id
     prefix = str(outdir / "result")
     try:
@@ -55,6 +56,7 @@ def _run_job(job_id, vcf_path, sample, hpo, note, assembly, use_esm, use_am, use
         result = rx.run_pipeline(
             vcf_path, sample=sample, hpo=hpo, clinical_note_text=note or None,
             assembly=assembly, use_esm=use_esm, use_am=use_am, agentic=use_agentic,
+            reflect_k=reflect_k, father_vcf=father_vcf, mother_vcf=mother_vcf,
             email=CONTACT_EMAIL, progress=progress,
         )
         rx.write_outputs(result, prefix)
@@ -87,33 +89,50 @@ async def analyze(
     esm: str = Form("false"),
     alphamissense: str = Form("false"),
     agentic: str = Form("false"),
+    reflect_k: str = Form("8"),
+    father: UploadFile = File(None),
+    mother: UploadFile = File(None),
 ):
     if assembly not in ("GRCh38", "GRCh37"):
         raise HTTPException(400, "assembly must be GRCh38 or GRCh37")
+    try:
+        reflect_k_i = max(1, min(int(reflect_k), 50))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "reflect_k must be an integer")
     job_id = uuid.uuid4().hex[:12]
     outdir = DATA_DIR / job_id
     outdir.mkdir(parents=True, exist_ok=True)
     vcf_path = outdir / "input.vcf"
 
-    # stream upload to disk with a size cap
-    size = 0
-    with open(vcf_path, "wb") as fh:
-        while chunk := await vcf.read(1 << 20):
-            size += len(chunk)
-            if size > MAX_MB * (1 << 20):
-                shutil.rmtree(outdir, ignore_errors=True)
-                raise HTTPException(413, f"VCF exceeds {MAX_MB} MB limit")
-            fh.write(chunk)
-    if size == 0:
+    async def _stream(upload, dest):
+        """Stream an uploaded file to dest with the size cap; return bytes written."""
+        n = 0
+        with open(dest, "wb") as fh:
+            while chunk := await upload.read(1 << 20):
+                n += len(chunk)
+                if n > MAX_MB * (1 << 20):
+                    shutil.rmtree(outdir, ignore_errors=True)
+                    raise HTTPException(413, f"VCF exceeds {MAX_MB} MB limit")
+                fh.write(chunk)
+        return n
+
+    if await _stream(vcf, vcf_path) == 0:
         shutil.rmtree(outdir, ignore_errors=True)
         raise HTTPException(400, "empty upload")
+
+    # optional trio parents (de novo detection → PS2)
+    father_path = mother_path = None
+    if father is not None and getattr(father, "filename", None):
+        father_path = str(outdir / "father.vcf"); await _stream(father, father_path)
+    if mother is not None and getattr(mother, "filename", None):
+        mother_path = str(outdir / "mother.vcf"); await _stream(mother, mother_path)
 
     _set(job_id, status="queued", sample=sample, started=time.time())
     t = threading.Thread(
         target=_run_job,
         args=(job_id, str(vcf_path), sample, hpo, clinical_note, assembly,
               esm.lower() == "true", alphamissense.lower() == "true",
-              agentic.lower() == "true"),
+              agentic.lower() == "true", reflect_k_i, father_path, mother_path),
         daemon=True,
     )
     t.start()
