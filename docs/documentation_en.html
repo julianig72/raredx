@@ -23,6 +23,7 @@
 <header>
  <h1>raredx — Scientific pipeline documentation</h1>
  <div class="sub">VCF annotation and phenotype-driven variant prioritization for rare-disease diagnosis · 2026-07-10</div>
+ <div style="margin-top:8px;font-size:13px"><a href="raredx_documentacion.html" style="color:#9fb3c8">Español ↗</a> · <b style="color:#fff">English</b></div>
 </header>
 
 <div class="toc"><b>Contents</b>
@@ -36,6 +37,7 @@
  <li><a href="#ia1">5 · Phenotype extraction from free text (LLM)</a></li>
  <li><a href="#combined">6 · Combined scoring and ranking</a></li>
  <li><a href="#agentic">7 · Agentic layer (self-reflection + traceable differential)</a></li>
+ <li><a href="#trio">7-bis · Trio analysis (de novo)</a></li>
  <li><a href="#outputs">8 · Outputs</a></li>
  <li><a href="#limits">9 · Assumptions, limits and validity</a></li>
  <li><a href="#refs">References and data sources</a></li>
@@ -208,6 +210,22 @@ cannot introduce invented citations.</li>
 <p><b>Scope and degradation.</b> Only the top-K enters self-reflection; the rest is annotated but not
 reasoned over by the LLM (the CSV marks each row with <code>agentic_evaluated</code> = yes/no). If no
 LLM is available (no key or accessor), the analysis completes anyway and the differential is empty.</p>
+
+<h2 id="trio">7-bis · Trio analysis (inheritance and <i>de novo</i> variants)</h2>
+<p>Parental VCFs can optionally be supplied. For each candidate variant, the same
+<code>(chromosome, position, ref, alt)</code> is looked up in each parent and an inheritance mode is
+assigned from the presence of the alt allele:</p>
+<table>
+<thead><tr><th>Mode</th><th>Condition</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>de_novo</code></td><td>alt in the child, absent from <b>both</b> genotyped parents</td><td>adds the ACMG <b>PS2</b> criterion (supporting strong) and a score bonus</td></tr>
+<tr><td><code>paternal</code> / <code>maternal</code></td><td>alt present in a single parent</td><td>inherited</td></tr>
+<tr><td><code>biparental</code></td><td>alt in both, heterozygous child</td><td>inherited from both</td></tr>
+<tr><td><code>homozygous_recessive</code></td><td>homozygous child, both parents carriers</td><td>compatible with recessive inheritance</td></tr>
+</tbody></table>
+<p>The result is added to the CSV (<code>inheritance</code>, <code>father_gt</code>,
+<code>mother_gt</code>) and the report shows an "Inheritance" column. <i>De novo</i> detection
+requires both parents to be genotyped at that locus; with a single parent the call is partial.</p>
 
 <h2 id="outputs">8 · Outputs</h2>
 <ul>
