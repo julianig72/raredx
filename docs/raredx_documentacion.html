@@ -23,6 +23,7 @@
 <header>
  <h1>raredx — Documentación científica del pipeline</h1>
  <div class="sub">Anotación de VCF y priorización de variantes dirigida por fenotipo para diagnóstico de enfermedades raras · 2026-07-10</div>
+ <div style="margin-top:8px;font-size:13px"><b style="color:#fff">Español</b> · <a href="documentation_en.html" style="color:#9fb3c8">English ↗</a></div>
 </header>
 
 <div class="toc"><b>Índice</b>
@@ -36,6 +37,7 @@
  <li><a href="#ia1">5 · Extracción de fenotipo desde texto (LLM)</a></li>
  <li><a href="#combinado">6 · Puntuación combinada y ranking</a></li>
  <li><a href="#agentica">7 · Capa agéntica (autorreflexión + diferencial trazable)</a></li>
+ <li><a href="#trio">7-bis · Análisis de trío (de novo)</a></li>
  <li><a href="#salidas">8 · Salidas</a></li>
  <li><a href="#limites">9 · Supuestos, límites y validez</a></li>
  <li><a href="#refs">Referencias y fuentes de datos</a></li>
@@ -206,6 +208,22 @@ emitido fuera del conjunto verificado: el modelo no puede introducir citas inven
 <p><b>Alcance y degradación.</b> Solo el top-K entra en la autorreflexión; el resto queda anotado pero
 no razonado por el LLM (el CSV marca cada fila con <code>agentic_evaluated</code> = yes/no). Si no hay
 LLM disponible (sin clave ni accesor), el análisis se completa igual y el diferencial queda vacío.</p>
+
+<h2 id="trio">7-bis · Análisis de trío (herencia y variantes <i>de novo</i>)</h2>
+<p>De forma opcional se pueden aportar los VCF de los progenitores. Para cada variante candidata, el
+mismo <code>(cromosoma, posición, ref, alt)</code> se busca en cada padre y se asigna un modo de
+herencia a partir de la presencia del alelo alt:</p>
+<table>
+<thead><tr><th>Modo</th><th>Condición</th><th>Efecto</th></tr></thead>
+<tbody>
+<tr><td><code>de_novo</code></td><td>alt en el hijo, ausente en <b>ambos</b> progenitores genotipados</td><td>añade el criterio ACMG <b>PS2</b> (soporte fuerte) y una bonificación al score</td></tr>
+<tr><td><code>paternal</code> / <code>maternal</code></td><td>alt presente en un solo progenitor</td><td>heredada</td></tr>
+<tr><td><code>biparental</code></td><td>alt en ambos, hijo heterocigoto</td><td>heredada de ambos</td></tr>
+<tr><td><code>homozygous_recessive</code></td><td>hijo homocigoto, ambos progenitores portadores</td><td>compatible con herencia recesiva</td></tr>
+</tbody></table>
+<p>El resultado se añade al CSV (<code>inheritance</code>, <code>father_gt</code>, <code>mother_gt</code>)
+y el informe muestra una columna "Herencia". La detección de <i>de novo</i> requiere que ambos
+progenitores estén genotipados en ese locus; con un solo progenitor la llamada es parcial.</p>
 
 <h2 id="salidas">8 · Salidas</h2>
 <ul>
