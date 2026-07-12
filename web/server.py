@@ -125,7 +125,8 @@ def _run_job(job_id, vcf_path, sample, hpo, note, assembly, use_esm, use_am, use
         variants = result["variants"]
         top = [
             {k: v.get(k) for k in ("rank","gene","consequence","protein","af","clinvar",
-                                   "af_status","call","combined","am_pathogenicity","esm2_llr","acmg_tags")}
+                                   "af_status","call","variant_score","pheno_score","pheno_disease",
+                                   "pheno_shared","combined","am_pathogenicity","esm2_llr","acmg_tags")}
             for v in variants[:15]
         ]
         # surface the agentic differential (disease-level hypotheses) to the UI, if computed

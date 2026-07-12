@@ -30,6 +30,51 @@ def test_parse_vcf_splits_alts_and_selects_requested_sample(tmp_path):
     assert [v["sample"]["GT"] for v in variants] == ["1/0", "0/1"]
 
 
+def test_parse_vcf_deduplicates_exact_alleles_and_keeps_strongest_call(tmp_path):
+    path = write_vcf(
+        tmp_path / "duplicates.vcf",
+        [
+            "chr1\t10\t.\tA\tG\t20\tPASS\t.\tGT:GQ:DP\t0/0:99:30\t0/1:99:20\n",
+            "1\t10\trs123\tA\tG\t100\tPASS\t.\tGT:GQ:DP\t0/0:99:30\t0/1:99:40\n",
+        ],
+    )
+
+    variants = rx.parse_vcf(path, sample="REQUESTED", allow_empty=False)
+
+    assert len(variants) == 1
+    assert variants[0]["rsid"] == "rs123"
+    assert variants[0]["qual"] == "100"
+    assert variants[0]["sample"]["DP"] == "40"
+
+
+def test_parse_vcf_variant_limit_counts_unique_alleles(tmp_path):
+    path = write_vcf(
+        tmp_path / "duplicate-limit.vcf",
+        [
+            "1\t10\t.\tA\tG\t20\tPASS\t.\tGT\t0/0\t0/1\n",
+            "1\t10\trs123\tA\tG\t100\tPASS\t.\tGT\t0/0\t0/1\n",
+        ],
+    )
+
+    assert len(rx.parse_vcf(path, sample="REQUESTED", max_variants=1)) == 1
+
+
+def test_parse_vcf_marks_conflicting_duplicate_genotypes_uncallable(tmp_path):
+    path = write_vcf(
+        tmp_path / "genotype-conflict.vcf",
+        [
+            "1\t10\t.\tA\tG\t20\tPASS\t.\tGT:GQ\t0/0:99\t0/1:30\n",
+            "1\t10\t.\tA\tG\t100\tPASS\t.\tGT:GQ\t0/0:99\t0/0:99\n",
+        ],
+    )
+
+    variants = rx.parse_vcf(path, sample="REQUESTED")
+
+    assert variants[0]["sample"]["GT"] == "./."
+    assert variants[0]["genotype_conflict"] is True
+    assert rx.parse_vcf(path, sample="REQUESTED", called_only=True) == []
+
+
 def test_parse_vcf_rejects_unknown_sample_in_multi_sample_input(tmp_path):
     path = write_vcf(
         tmp_path / "multi.vcf",
@@ -133,6 +178,136 @@ def test_expand_hpo_profile_labels_direct_terms_and_ancestors(monkeypatch):
     ]
 
 
+def test_gene_pheno_score_does_not_merge_different_diseases(monkeypatch):
+    monkeypatch.setattr(
+        rx,
+        "_gql",
+        lambda *args, **kwargs: {
+            "data": {
+                "target": {
+                    "associatedDiseases": {
+                        "rows": [
+                            {
+                                "score": 0.9,
+                                "disease": {
+                                    "name": "Disease A",
+                                    "phenotypes": {
+                                        "rows": [
+                                            {"phenotypeHPO": {"id": "HP_0000002", "name": "Feature A"}}
+                                        ]
+                                    },
+                                },
+                            },
+                            {
+                                "score": 0.8,
+                                "disease": {
+                                    "name": "Disease B",
+                                    "phenotypes": {
+                                        "rows": [
+                                            {"phenotypeHPO": {"id": "HP_0000003", "name": "Feature B"}}
+                                        ]
+                                    },
+                                },
+                            },
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    score, direct, matched, disease, shared = rx.gene_pheno_score(
+        "ENSG1",
+        {"HP:0000002", "HP:0000003"},
+        {"HP:0000002", "HP:0000003"},
+    )
+
+    assert score == 0.45
+    assert (direct, matched, disease, shared) == (1, 1, "Disease A", "Feature A")
+
+
+def test_gene_pheno_score_uses_disease_association_strength(monkeypatch):
+    monkeypatch.setattr(
+        rx,
+        "_gql",
+        lambda *args, **kwargs: {
+            "data": {
+                "target": {
+                    "associatedDiseases": {
+                        "rows": [
+                            {
+                                "score": 0.2,
+                                "disease": {
+                                    "name": "Weak association",
+                                    "phenotypes": {
+                                        "rows": [
+                                            {"phenotypeHPO": {"id": "HP_0001250", "name": "Seizure"}}
+                                        ]
+                                    },
+                                },
+                            },
+                            {
+                                "score": 0.8,
+                                "disease": {
+                                    "name": "Strong association",
+                                    "phenotypes": {
+                                        "rows": [
+                                            {"phenotypeHPO": {"id": "HP_0001250", "name": "Seizure"}}
+                                        ]
+                                    },
+                                },
+                            },
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    score, _, _, disease, _ = rx.gene_pheno_score(
+        "ENSG1", {"HP:0001250"}, {"HP:0001250"}
+    )
+
+    assert score == 0.8
+    assert disease == "Strong association"
+
+
+def test_gene_pheno_score_rejects_missing_association_strength(monkeypatch):
+    monkeypatch.setattr(
+        rx,
+        "_gql",
+        lambda *args, **kwargs: {
+            "data": {
+                "target": {
+                    "associatedDiseases": {
+                        "rows": [
+                            {
+                                "score": None,
+                                "disease": {
+                                    "name": "Incomplete association",
+                                    "phenotypes": {
+                                        "rows": [
+                                            {"phenotypeHPO": {"id": "HP_0001250", "name": "Seizure"}}
+                                        ]
+                                    },
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    score, _, _, disease, _, available = rx.gene_pheno_score(
+        "ENSG1", {"HP:0001250"}, {"HP:0001250"}, return_status=True
+    )
+
+    assert score == 0.0
+    assert disease == ""
+    assert not available
+
+
 def test_parse_vcf_rejects_non_vcf_and_empty_variant_set(tmp_path):
     invalid = tmp_path / "invalid.vcf"
     invalid.write_text("not a VCF\n", encoding="utf-8")
@@ -209,11 +384,24 @@ def test_trio_requires_explicit_parent_calls_for_de_novo(tmp_path):
     rx.trio_inheritance(variants, father, mother)
     assert variants[0]["inheritance"] == "absent_in_parents"
 
+    write_vcf(
+        father,
+        [
+            "1\t10\t.\tA\tG\t20\tPASS\t.\tGT:GQ\t0/1:30\n",
+            "1\t10\t.\tA\tG\t100\tPASS\t.\tGT:GQ\t0/0:99\n",
+        ],
+        trio_header,
+    )
+    variants = rx.parse_vcf(child)
+    rx.trio_inheritance(variants, father, mother)
+    assert variants[0]["inheritance"] == "absent_in_parents"
+    assert variants[0]["father_gt"] == "./."
+
 
 def test_ba1_dominates_pathogenic_evidence_and_conflicts_stay_vus():
     call, tags = rx.classify(0.10, "stop_gained", 0.99, 0.2, None, 0, None, None)
     assert call == "Benign"
-    assert {t[0] for t in tags} >= {"BA1", "PVS1"}
+    assert {t[0] for t in tags} >= {"BA1", "LoF_predicted"}
 
     call, tags = rx.classify(
         None,
@@ -227,6 +415,25 @@ def test_ba1_dominates_pathogenic_evidence_and_conflicts_stay_vus():
     )
     assert call == "Uncertain significance (VUS)"
     assert "ClinVar_conflicting" in {t[0] for t in tags}
+
+
+def test_predicted_lof_is_not_automatically_pvs1():
+    call, tags = rx.classify(
+        None, "frameshift_variant", 1.0, 0.1, None, 0, None, None
+    )
+    codes = {tag[0] for tag in tags}
+
+    assert call == "Uncertain significance (VUS)"
+    assert codes >= {"PM2", "LoF_predicted"}
+    assert "PVS1" not in codes
+
+
+def test_acmg_evidence_combinations_do_not_overcall_pvs1_plus_pm2():
+    assert rx._call_from_tags([("PVS1", ""), ("PM2", "")]) == "Likely pathogenic"
+    assert (
+        rx._call_from_tags([("PVS1", ""), ("PM2", ""), ("PS2", "")])
+        == "Pathogenic"
+    )
 
 
 def test_unavailable_gnomad_does_not_assign_pm2():

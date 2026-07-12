@@ -112,22 +112,22 @@ en un veredicto de 5 niveles. Los umbrales implementados son:</p>
 <tr><td><code>BA1</code></td><td>gnomAD AF ≥ 0.05</td><td>benigno (fuerte)</td></tr>
 <tr><td><code>BS1</code></td><td>gnomAD AF ≥ 0.01</td><td>benigno (fuerte)</td></tr>
 <tr><td><code>PM2</code></td><td>ausente en gnomAD r4, o AF &lt; 1×10⁻⁴</td><td>patogénico (moderado)</td></tr>
-<tr><td><code>PVS1</code></td><td>consecuencia LoF (stop_gained, frameshift, splice donor/acceptor) <b>en gen intolerante</b> (pLI ≥ 0.9 o LOEUF &lt; 0.6); si la restricción es modesta → <code>PVS1_mod</code></td><td>patogénico (muy fuerte)</td></tr>
+<tr><td><code>LoF_predicted</code></td><td>consecuencia LoF (stop_gained, frameshift, splice donor/acceptor). pLI/LOEUF se conserva como contexto, pero no activa PVS1</td><td>priorización; no clasifica por sí sola</td></tr>
 <tr><td><code>PP3</code> / <code>BP4</code></td><td>SIFT deletéreo &amp; PolyPhen dañino → PP3; SIFT tolerado &amp; PolyPhen benigno → BP4</td><td>ambas direcciones</td></tr>
 <tr><td><code>PP3_ESM</code> / <code>BP4_ESM</code></td><td>llamada de ESM-2 (ver §3)</td><td>ambas direcciones</td></tr>
 <tr><td><code>PP3_AM</code> / <code>BP4_AM</code></td><td>llamada de AlphaMissense (ver §3)</td><td>ambas direcciones</td></tr>
 <tr><td><code>PS_ClinVar</code> / <code>PP5_ClinVar</code></td><td>ClinVar "pathogenic": ≥2★ → PS; &lt;2★ → PP5</td><td>patogénico</td></tr>
 <tr><td><code>BS_ClinVar</code> / <code>BP6_ClinVar</code></td><td>ClinVar "benign": ≥2★ → BS; &lt;2★ → BP6</td><td>benigno</td></tr>
 </tbody></table>
-<p>Las etiquetas se combinan de forma conservadora mediante puntos de evidencia:
-<code>PVS1</code> +8; <code>PS_ClinVar</code>/<code>PS2</code> +4;
-<code>PM2</code>/<code>PVS1_mod</code> +2; <code>PP5_ClinVar</code> y la familia de predictores PP3
-+1; <code>BS1</code>/<code>BS_ClinVar</code> −4; y <code>BP6_ClinVar</code> o la familia BP4 −1.
-Los predictores computacionales correlacionados cuentan una sola vez. Una suma ≥10 produce
-<b>Patogénica</b>, 6–9 <b>Prob. patogénica</b>, −6 a −2 <b>Prob. benigna</b>, ≤−7
-<b>Benigna</b> y el resto <b>VUS</b>. <code>BA1</code> actúa como regla benigna independiente y la
-evidencia conflictiva de ClinVar fuerza VUS. Las variantes marcadas "drug response" en ClinVar se
-etiquetan además como farmacogenómicas.</p>
+<p>La clase se determina mediante combinaciones de fuerza ACMG/AMP, no mediante una suma de puntos.
+Por ejemplo, PVS1 (muy fuerte) + PM2 (moderada) produce <b>Prob. patogénica</b>; para
+<b>Patogénica</b> hace falta PVS1 + una fuerte, PVS1 + dos moderadas, PVS1 + una moderada + una de
+soporte, PVS1 + dos de soporte, dos fuertes u otra combinación ACMG equivalente. El motor no asigna
+PVS1 automáticamente: una predicción LoF queda como <code>LoF_predicted</code> hasta revisar el
+mecanismo de enfermedad, el transcrito, NMD y la región funcional. pLI/LOEUF no bastan para esta
+decisión. <code>BA1</code> actúa como regla benigna independiente y la evidencia patogénica/benigna
+conflictiva fuerza VUS. Los pesos numéricos se usan solo para ordenar variantes, no para definir la
+clase.</p>
 
 <h2 id="ia-missense">3 · Predictores de IA para variantes missense</h2>
 <p>Para variantes missense se añaden dos predictores in-silico modernos que alimentan PP3/BP4,
@@ -162,11 +162,12 @@ evidencia de soporte (PP3/BP4), nunca como árbitro único.</p>
 (GraphQL) su conjunto de enfermedades asociadas y, por enfermedad, sus fenotipos HPO
 (<code>phenotypeHPO</code>; Open Targets los sirve en forma con guion bajo, <code>HP_xxxxxxx</code>,
 que se normaliza a <code>HP:xxxxxxx</code>). El perfil HPO del paciente se expande ontológicamente con
-sus ancestros. El <code>pheno_score</code> pondera coincidencias directas más fuerte que las
-coincidencias solo por ancestro:</p>
-<div class="eq">pheno_score = ( n<sub>directas</sub> · 1.0 + n<sub>solo-ancestro</sub> · 0.4 ) / n<sub>HPO paciente</sub>   (recortado a 1.0)</div>
-<p>Se retiene además la enfermedad con más coincidencias directas y sus términos compartidos, para
-mostrarlos como evidencia del emparejamiento fenotipo-gen.</p>
+sus ancestros. Para cada enfermedad se ponderan las coincidencias directas más fuerte que las
+coincidencias solo por ancestro y se incorpora la fuerza de asociación de Open Targets:</p>
+<div class="eq">score<sub>enfermedad</sub> = asociación<sub>OT</sub> · min(1, (n<sub>directas</sub> + 0.4·n<sub>solo-ancestro</sub>) / n<sub>HPO paciente</sub>)</div>
+<p>El <code>pheno_score</code> es el máximo score de una sola enfermedad; no mezcla fenotipos de
+enfermedades distintas del mismo gen. Se muestran la enfermedad elegida y sus términos compartidos.
+Un perfil con una sola HPO directa genera una advertencia de baja especificidad.</p>
 
 <h2 id="ia1">5 · Extracción de fenotipo desde texto (LLM)</h2>
 <p>Como alternativa a introducir códigos HPO a mano, se puede aportar una <b>nota clínica en lenguaje

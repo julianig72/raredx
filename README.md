@@ -158,7 +158,7 @@ si todos los candidatos se refutan. El CSV marca cada fila con `agentic_evaluate
 |------|--------|--------|
 | Consecuencia funcional | Ensembl VEP | missense/stop/frameshift + SIFT/PolyPhen |
 | Frecuencia poblacional | gnomAD r4 | AF (BA1/BS1: comun => benigna) |
-| Restriccion genica | gnomAD | pLI, LOEUF (PVS1 en genes intolerantes a LoF) |
+| Restriccion genica | gnomAD | pLI, LOEUF como contexto; no bastan para activar PVS1 |
 | Significancia clinica | ClinVar | veredicto + estrellas de oro |
 | **IA missense** | **ESM-2** | **LLR evolutivo -> PP3/BP4** |
 | **IA missense** | **AlphaMissense** | **patogenicidad 0-1 -> PP3/BP4** |
@@ -169,6 +169,12 @@ El motor calcula un `variant_score` absoluto (0-1) por variante sumando pesos AC
 normaliza contra las demás variantes del mismo VCF. Las capas de IA missense participan antes de
 la clasificación final:
 
+- Una consecuencia `frameshift`, `stop_gained` o de splicing se marca como `LoF_predicted`, pero
+  **no recibe PVS1 automáticamente**. PVS1 exige demostrar que la pérdida de función es el mecanismo
+  de la enfermedad y revisar transcrito, NMD y región funcional; pLI/LOEUF por sí solos no bastan.
+- La clase de cinco niveles usa combinaciones de fuerzas ACMG/AMP, no una suma de puntos. Incluso
+  cuando PVS1 se valida independientemente, `PVS1 + PM2` corresponde a **Likely pathogenic**, no a
+  **Pathogenic**.
 - **ESM-2** y **AlphaMissense** aportan `PP3` (deletérea) o `BP4` (tolerada) y ajustan el
   `variant_score`; AlphaMissense pesa algo más por ser un predictor clínicamente calibrado. Para
   evitar contar varias veces evidencia computacional correlacionada, todas las etiquetas de la
@@ -188,6 +194,10 @@ combined = 0.55 * variant_score + 0.45 * pheno_score     (× 0.5 si la variante 
 
 Así, entre dos variantes con evidencia molecular parecida, la que encaja con la clínica del
 paciente asciende en el ranking — el principio de priorización dirigida por fenotipo de Exomiser.
+El `pheno_score` se calcula para cada enfermedad por separado, multiplicando la cobertura HPO por
+la fuerza de asociación de Open Targets, y se conserva la mejor enfermedad. Nunca se suman
+fenotipos de enfermedades distintas del mismo gen. Un perfil con una sola HPO genera una
+advertencia de baja especificidad.
 
 ## Uso completo
 

@@ -113,21 +113,22 @@ The implemented thresholds are:</p>
 <tr><td><code>BA1</code></td><td>gnomAD AF ≥ 0.05</td><td>benign (strong)</td></tr>
 <tr><td><code>BS1</code></td><td>gnomAD AF ≥ 0.01</td><td>benign (strong)</td></tr>
 <tr><td><code>PM2</code></td><td>absent from gnomAD r4, or AF &lt; 1×10⁻⁴</td><td>pathogenic (moderate)</td></tr>
-<tr><td><code>PVS1</code></td><td>LoF consequence (stop_gained, frameshift, splice donor/acceptor) <b>in a constrained gene</b> (pLI ≥ 0.9 or LOEUF &lt; 0.6); if constraint is modest → <code>PVS1_mod</code></td><td>pathogenic (very strong)</td></tr>
+<tr><td><code>LoF_predicted</code></td><td>LoF consequence (stop_gained, frameshift, splice donor/acceptor). pLI/LOEUF is retained as context but does not activate PVS1</td><td>prioritization; not classifying by itself</td></tr>
 <tr><td><code>PP3</code> / <code>BP4</code></td><td>SIFT deleterious &amp; PolyPhen damaging → PP3; SIFT tolerated &amp; PolyPhen benign → BP4</td><td>both directions</td></tr>
 <tr><td><code>PP3_ESM</code> / <code>BP4_ESM</code></td><td>ESM-2 call (see §3)</td><td>both directions</td></tr>
 <tr><td><code>PP3_AM</code> / <code>BP4_AM</code></td><td>AlphaMissense call (see §3)</td><td>both directions</td></tr>
 <tr><td><code>PS_ClinVar</code> / <code>PP5_ClinVar</code></td><td>ClinVar "pathogenic": ≥2★ → PS; &lt;2★ → PP5</td><td>pathogenic</td></tr>
 <tr><td><code>BS_ClinVar</code> / <code>BP6_ClinVar</code></td><td>ClinVar "benign": ≥2★ → BS; &lt;2★ → BP6</td><td>benign</td></tr>
 </tbody></table>
-<p>Tags are combined conservatively with evidence points: <code>PVS1</code> +8;
-<code>PS_ClinVar</code>/<code>PS2</code> +4; <code>PM2</code>/<code>PVS1_mod</code> +2;
-<code>PP5_ClinVar</code> and the PP3 predictor family +1; <code>BS1</code>/<code>BS_ClinVar</code>
-−4; and <code>BP6_ClinVar</code> or the BP4 predictor family −1. Correlated computational predictors
-count only once. Scores ≥10 are <b>Pathogenic</b>, 6–9 <b>Likely pathogenic</b>, −6 to −2
-<b>Likely benign</b>, ≤−7 <b>Benign</b>, and the remainder <b>VUS</b>. <code>BA1</code> is a
-stand-alone benign rule and conflicting ClinVar evidence is forced to VUS. Variants flagged "drug
-response" in ClinVar are additionally tagged pharmacogenomic.</p>
+<p>The class is determined with ACMG/AMP strength combinations, not a point sum. For example, PVS1
+(very strong) + PM2 (moderate) yields <b>Likely pathogenic</b>; <b>Pathogenic</b> requires PVS1 plus
+one strong, PVS1 plus two moderate, PVS1 plus one moderate and one supporting, PVS1 plus two
+supporting, two strong, or another equivalent ACMG combination. The engine does not assign PVS1
+automatically: a predicted LoF remains <code>LoF_predicted</code> until disease mechanism,
+transcript relevance, NMD, and functional region have been reviewed. pLI/LOEUF alone is
+insufficient. <code>BA1</code> is a stand-alone benign rule, and conflicting pathogenic/benign
+evidence is forced to VUS. Numeric weights are used only to rank variants, not to define the
+class.</p>
 
 <h2 id="ai-missense">3 · AI predictors for missense variants</h2>
 <p>For missense variants, two modern in-silico predictors are added that feed PP3/BP4, superseding the
@@ -163,11 +164,12 @@ evidence (PP3/BP4), never as a sole arbiter.</p>
 retrieved from <b>Open Targets</b> (GraphQL) and, per disease, its HPO phenotypes
 (<code>phenotypeHPO</code>; Open Targets serves them in underscore form, <code>HP_xxxxxxx</code>,
 normalized to <code>HP:xxxxxxx</code>). The patient HPO profile is expanded ontologically with its
-ancestors. The <code>pheno_score</code> weights direct matches more strongly than ancestor-only
-matches:</p>
-<div class="eq">pheno_score = ( n<sub>direct</sub> · 1.0 + n<sub>ancestor-only</sub> · 0.4 ) / n<sub>patient HPO</sub>   (capped at 1.0)</div>
-<p>The disease with the most direct matches and its shared terms are also retained, to display them as
-evidence of the phenotype–gene match.</p>
+ancestors. For each disease, direct matches are weighted more strongly than ancestor-only matches,
+and the Open Targets association strength is included:</p>
+<div class="eq">disease_score = association<sub>OT</sub> · min(1, (n<sub>direct</sub> + 0.4·n<sub>ancestor-only</sub>) / n<sub>patient HPO</sub>)</div>
+<p>The <code>pheno_score</code> is the maximum score from one disease; phenotypes from different
+diseases of the same gene are never merged. The selected disease and shared terms are displayed.
+A profile with only one direct HPO term produces a low-specificity warning.</p>
 
 <h2 id="ia1">5 · Phenotype extraction from free text (LLM)</h2>
 <p>As an alternative to entering HPO codes manually, a <b>clinical note in natural language</b> can be

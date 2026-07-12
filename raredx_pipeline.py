@@ -198,9 +198,63 @@ def _called_alt(sample):
         return None
 
 
+def _numeric(value, default=-1.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _genotype_signature(sample):
+    gt=(sample or {}).get("GT")
+    if not gt:
+        return None
+    parts=gt.replace("|","/").split("/")
+    if any(part=="." for part in parts):
+        return None
+    try:
+        return tuple(sorted(int(part) for part in parts))
+    except ValueError:
+        return None
+
+
+def _vcf_record_rank(record):
+    """Prefer the strongest call when the same exact allele occurs more than once."""
+    sample=record.get("sample") or {}
+    filter_value=str(record.get("filter") or "").upper()
+    filter_rank=2 if filter_value=="PASS" else 1 if filter_value in {"",".","UNFILTERED"} else 0
+    return (
+        filter_rank,
+        int(_genotype_signature(sample) is not None),
+        _numeric(sample.get("GQ")),
+        _numeric(record.get("qual")),
+        _numeric(sample.get("DP")),
+        int(record.get("rsid") is not None),
+        sum(str(value) not in {"","."} for key,value in sample.items() if key!="GT"),
+    )
+
+
+def _merge_vcf_records(existing, candidate):
+    winner=candidate if _vcf_record_rank(candidate)>_vcf_record_rank(existing) else existing
+    existing_gt=_genotype_signature(existing.get("sample"))
+    candidate_gt=_genotype_signature(candidate.get("sample"))
+    conflict=bool(existing.get("genotype_conflict")) or (
+        existing_gt is not None and candidate_gt is not None and existing_gt!=candidate_gt
+    )
+    if not conflict:
+        return winner
+    winner=dict(winner)
+    winner["sample"]=dict(winner.get("sample") or {})
+    winner["sample"]["GT"]="./."
+    winner["genotype_conflict"]=True
+    return winner
+
+
 def parse_vcf(path, sample=None, allow_empty=True, max_variants=None, called_only=False):
     """Parse one record per ALT allele and select the requested sample when present."""
     out=[]
+    allele_indexes={}
+    excluded_records={}
     header_seen=False
     sample_names=[]
     sample_col=None
@@ -249,13 +303,33 @@ def parse_vcf(path, sample=None, allow_empty=True, max_variants=None, called_onl
                          ref=f[3],alt=alt,qual=f[5],filter=f[6] or "PASS")
                 if sample_col is not None and len(f)>sample_col:
                     rec["sample"]=_sample_for_alt(f[8].split(":"),f[sample_col],alt_index)
-                    if called_only and _called_alt(rec["sample"]) is not True:
+                allele_key=(chrom,pos,f[3].upper(),alt.upper())
+                if called_only and _called_alt(rec.get("sample")) is not True:
+                    existing_index=allele_indexes.get(allele_key)
+                    if existing_index is not None:
+                        out[existing_index]=_merge_vcf_records(out[existing_index],rec)
+                    else:
+                        previous=excluded_records.get(allele_key)
+                        excluded_records[allele_key]=(
+                            _merge_vcf_records(previous,rec) if previous is not None else rec
+                        )
+                    continue
+                if called_only and allele_key in excluded_records:
+                    rec=_merge_vcf_records(excluded_records.pop(allele_key),rec)
+                    if _called_alt(rec.get("sample")) is not True:
                         continue
+                existing_index=allele_indexes.get(allele_key)
+                if existing_index is not None:
+                    out[existing_index]=_merge_vcf_records(out[existing_index],rec)
+                    continue
+                allele_indexes[allele_key]=len(out)
                 out.append(rec)
                 if max_variants is not None and len(out)>max_variants:
                     raise VCFParseError(f"VCF exceeds the {max_variants} variant analysis limit")
     if not header_seen:
         raise VCFParseError("invalid VCF: missing #CHROM header")
+    if called_only:
+        out=[record for record in out if _called_alt(record.get("sample")) is True]
     if not out and not allow_empty:
         raise VCFParseError("VCF contains no supported variant records")
     return out
@@ -407,23 +481,42 @@ def _call_from_tags(tags, sig=""):
     elif "ClinVar_conflicting" in codes:
         call="Uncertain significance (VUS)"
     else:
-        points=0
-        points+=8 if "PVS1" in codes else 0
-        points+=4*len({"PS_ClinVar","PS2"}&codes)
-        points+=2*len({"PM2","PVS1_mod"}&codes)
-        points+=int("PP5_ClinVar" in codes)
-        points+=int(bool({"PP3","PP3_ESM","PP3_AM"}&codes))
-        points-=4*len({"BS1","BS_ClinVar"}&codes)
-        points-=int("BP6_ClinVar" in codes)
-        points-=int(bool({"BP4","BP4_ESM","BP4_AM"}&codes))
-        if points>=10:
-            call="Pathogenic"
-        elif points>=6:
-            call="Likely pathogenic"
-        elif points<=-7:
+        very_strong=int("PVS1" in codes)
+        strong=len({"PS_ClinVar","PS2"}&codes)
+        moderate=len({"PM2","PVS1_mod"}&codes)
+        supporting=int("PP5_ClinVar" in codes)+int(bool({"PP3","PP3_ESM","PP3_AM"}&codes))
+        benign_strong=len({"BS1","BS_ClinVar"}&codes)
+        benign_supporting=int("BP6_ClinVar" in codes)+int(
+            bool({"BP4","BP4_ESM","BP4_AM"}&codes)
+        )
+        pathogenic_evidence=very_strong+strong+moderate+supporting
+        benign_evidence=benign_strong+benign_supporting
+        if pathogenic_evidence and benign_evidence:
+            call="Uncertain significance (VUS)"
+        elif benign_strong>=2:
             call="Benign"
-        elif points<=-2:
+        elif (benign_strong>=1 and benign_supporting>=1) or benign_supporting>=2:
             call="Likely benign"
+        elif (
+            (very_strong and strong>=1)
+            or (very_strong and moderate>=2)
+            or (very_strong and moderate>=1 and supporting>=1)
+            or (very_strong and supporting>=2)
+            or strong>=2
+            or (strong>=1 and moderate>=3)
+            or (strong>=1 and moderate>=2 and supporting>=2)
+            or (strong>=1 and moderate>=1 and supporting>=4)
+        ):
+            call="Pathogenic"
+        elif (
+            (very_strong and moderate>=1)
+            or (strong>=1 and 1<=moderate<=2)
+            or (strong>=1 and supporting>=2)
+            or moderate>=3
+            or (moderate>=2 and supporting>=2)
+            or (moderate>=1 and supporting>=4)
+        ):
+            call="Likely pathogenic"
         else:
             call="Uncertain significance (VUS)"
     if "drug response" in (sig or "").lower():
@@ -438,10 +531,17 @@ def classify(af, cons, pli, loeuf, sig, stars, sift, poly, af_available=True, ex
     if not af_available: tags.append(("gnomAD_unavailable","gnomAD lookup unavailable; absence not assessed"))
     elif af is None: tags.append(("PM2","absent from gnomAD r4"))
     elif af<1e-4: tags.append(("PM2",f"gnomAD AF {af:.2e} <0.01%"))
-    lof_intol=(pli is not None and pli>=0.9) or (loeuf is not None and loeuf<0.6)
     if cons in LOF_TERMS:
-        tags.append(("PVS1" if lof_intol else "PVS1_mod",
-                     f"{cons}"+(" in LoF-intolerant gene" if lof_intol else " (constraint modest)")))
+        constraint=(
+            "gene is LoF-constrained"
+            if (pli is not None and pli>=0.9) or (loeuf is not None and loeuf<0.6)
+            else "gene constraint is modest or unavailable"
+        )
+        tags.append((
+            "LoF_predicted",
+            f"{cons}; {constraint}; PVS1 requires a confirmed disease mechanism, "
+            "transcript relevance, and NMD assessment",
+        ))
     if sift and "deleterious" in sift and poly and "damaging" in poly:
         tags.append(("PP3",f"SIFT {sift} & PolyPhen {poly}"))
     elif sift=="tolerated" and poly and "benign" in poly:
@@ -528,7 +628,7 @@ def expand_hpo_profile(tokens, return_status=False):
     )
     return (result,available) if return_status else result
 
-OT_Q="""query($id:String!){ target(ensemblId:$id){ associatedDiseases(page:{size:6,index:0}){
+OT_Q="""query($id:String!){ target(ensemblId:$id){ associatedDiseases(page:{size:25,index:0}){
   rows{ score disease{ id name phenotypes(page:{size:80,index:0}){ rows{ phenotypeHPO{ id name } } } } } } } }"""
 def gene_pheno_score(ensg, patient_ids, patient_full, return_status=False):
     empty=(0.0,0,0,"","")
@@ -539,21 +639,45 @@ def gene_pheno_score(ensg, patient_ids, patient_full, return_status=False):
     if not available:
         return (*empty,False) if return_status else empty
     t=(((j or {}).get("data") or {}).get("target")) or {}
-    hpo={}; best=None
-    for row in ((t.get("associatedDiseases") or {}).get("rows") or []):
+    rows=(t.get("associatedDiseases") or {}).get("rows") or []
+    best=None
+    valid_associations=0
+    missing_associations=False
+    for row in rows:
+        association=_numeric(row.get("score"),None)
+        if association is None:
+            missing_associations=True
+            continue
+        valid_associations+=1
         d=row["disease"]
         dh={p["phenotypeHPO"]["id"].replace("_",":"):p["phenotypeHPO"]["name"]
             for p in ((d.get("phenotypes") or {}).get("rows") or []) if p.get("phenotypeHPO")}
-        shared=[h for h in dh if h in patient_full]
-        directsh=[h for h in dh if h in patient_ids]
-        if shared and (best is None or len(directsh)>best[1]):
-            best=(d["name"], len(directsh), [dh[h] for h in shared][:5])
-        hpo.update(dh)
-    direct=set(hpo)&patient_ids; matched=set(hpo)&patient_full
-    score=(len(direct)*1.0+(len(matched)-len(direct))*0.4)/max(len(patient_ids),1)
-    result=(round(min(score,1.0),3),len(direct),len(matched),
-            (best[0] if best else ""),("; ".join(best[2]) if best else ""))
-    return (*result,True) if return_status else result
+        direct=set(dh)&patient_ids
+        matched=set(dh)&patient_full
+        ancestor=matched-direct
+        coverage=(len(direct)+0.4*len(ancestor))/max(len(patient_ids),1)
+        association=min(1.0,max(0.0,association))
+        score=min(coverage,1.0)*association
+        candidate=(
+            score,
+            len(direct),
+            len(matched),
+            association,
+            d.get("name") or "",
+            [dh[h] for h in sorted(matched)][:5],
+        )
+        if matched and (best is None or candidate[:4]>best[:4]):
+            best=candidate
+    result=(
+        round(best[0],3) if best else 0.0,
+        best[1] if best else 0,
+        best[2] if best else 0,
+        best[4] if best else "",
+        "; ".join(best[5]) if best else "",
+    )
+    if rows and missing_associations and valid_associations==0:
+        available=False
+    return (*result,available) if return_status else result
 
 
 # ---------- AI module A: ESM-2 missense pathogenicity (optional) ----------
@@ -1422,6 +1546,15 @@ def write_html(variants, patient_hpo, prefix, assembly="GRCh38", agentic=None, w
             ec="#c0392b" if float(llr)<=-3 else ("#27ae60" if float(llr)>=-0.5 else "#7f8c8d")
             parts.append(f'<span style="color:{ec}" title="ESM-2 LLR">ESM {float(llr):.1f}</span>')
         return " ".join(parts) or "—"
+    def pheno_cell(v):
+        score=float(v.get("pheno_score") or 0)
+        disease=html.escape(str(v.get("pheno_disease") or "sin enfermedad coincidente"))
+        shared=html.escape(str(v.get("pheno_shared") or "sin HPO compartidos"))
+        return (
+            f'<td style="color:#8e44ad"><b>{score:.2f}</b><br>'
+            f'<span style="font-size:10px;color:#34495e">{disease}</span><br>'
+            f'<span style="font-size:9px;color:#7f8c8d">{shared}</span></td>'
+        )
     chips="".join(f'<span class="hpo">{html.escape(t["label"])} <code>{html.escape(t["hpo_id"])}</code></span>' for t in patient_hpo)
     warning_html=""
     if warnings:
@@ -1445,7 +1578,7 @@ def write_html(variants, patient_hpo, prefix, assembly="GRCh38", agentic=None, w
                  f'<td>{ai_cell(v)}</td>'
                  f'<td style="color:{col(v["call"])};font-weight:600">{html.escape(tier(v["call"]))}</td>'
                  + (inh_cell(v) if has_trio else "")
-                 + f'<td>{v.get("variant_score",0):.2f}</td><td style="color:#8e44ad">{v.get("pheno_score",0):.2f}</td>'
+                 + f'<td>{v.get("variant_score",0):.2f}</td>{pheno_cell(v)}'
                  f'<td><b>{v.get("combined",0):.2f}</b></td><td>{html.escape(str(v.get("filter") or ""))}</td></tr>' for v in variants)
     inh_th="<th>Herencia</th>" if has_trio else ""
     now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1463,7 +1596,7 @@ td{{padding:7px 8px;border-top:1px solid #eef1f5}} .note{{background:#fff8e1;bor
 {warning_html}
 {_differential_html(agentic)}
 <h2 style="font-size:14px;color:#1e2a38;margin:18px 0 4px">Variantes candidatas priorizadas</h2>
-<table><thead><tr><th>#</th><th>Gen</th><th>Variante</th><th>gnomAD</th><th>ClinVar</th><th>IA</th><th>Clase</th>{inh_th}<th>Var</th><th>Feno</th><th>Comb</th><th>QC</th></tr></thead>
+<table><thead><tr><th>#</th><th>Gen</th><th>Variante</th><th>gnomAD</th><th>ClinVar</th><th>IA</th><th>Clase</th>{inh_th}<th>Var</th><th>Encaje HPO</th><th>Comb</th><th>QC</th></tr></thead>
 <tbody>{rows}</tbody></table>
 <div class="note"><b>Sistema de apoyo a la decision, no diagnostico.</b> VEP + gnomAD + ClinVar (score de variante ACMG-lite) x fenotipos HPO de Open Targets (score fenotipico). Confirmar por metodo ortogonal e interpretar en contexto clinico.</div>
 </body></html>"""
@@ -1489,6 +1622,7 @@ def _variant_evidence_score(tags, call):
     score+=0.25 if "PS2" in codes else 0
     score+=0.15 if "PM2" in codes else 0
     score+=0.12 if "PVS1_mod" in codes else 0
+    score+=0.12 if "LoF_predicted" in codes else 0
     score+=(0.10 if "PP3_AM" in codes else 0.08 if {"PP3","PP3_ESM"}&codes else 0)
     score+=0.06 if "PP5_ClinVar" in codes else 0
     score-=0.30 if "BS_ClinVar" in codes else 0
@@ -1593,6 +1727,13 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
             warnings.append("HPO ancestor expansion was partially unavailable; phenotype matching may be incomplete")
     else:
         patient_full=set()
+    if len(patient_ids)==1:
+        only_hpo=next(iter(patient_ids))
+        warnings.append(
+            f"Phenotype profile contains only one direct HPO term ({only_hpo}); "
+            "phenotype ranking has low specificity. Add other observed clinical "
+            "features before interpreting gene order."
+        )
     if patient_hpo: _prog(0, len(variants), f"{len(patient_ids)} términos HPO (expandidos a {len(patient_full)})")
 
     cons_cache={}

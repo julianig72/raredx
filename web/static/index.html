@@ -167,7 +167,7 @@ método ortogonal (Sanger) y ser interpretado por un genetista clínico con el c
     <a class="csv" id="csvbtn">Descargar CSV</a>
   </div>
   <table id="toptable"><thead><tr>
-    <th>#</th><th>Gen</th><th>Consecuencia</th><th>Proteína</th><th>gnomAD</th><th>ClinVar</th><th>AlphaM.</th><th>Clasificación</th><th>Score</th>
+    <th>#</th><th>Gen</th><th>Consecuencia</th><th>Proteína</th><th>gnomAD</th><th>ClinVar</th><th>AlphaM.</th><th>Clasificación</th><th>Encaje HPO</th><th>Score</th>
   </tr></thead><tbody id="topbody"></tbody></table>
 </div>
 
@@ -528,7 +528,11 @@ function done(job, s){
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>${esc(v.rank)}</td><td><b>${esc(v.gene || '—')}</b></td><td>${esc((v.consequence||'').replace(/_/g,' '))}</td>
       <td>${esc(v.protein || '—')}</td><td>${esc(af)}</td><td>${esc(v.clinvar || '—')}</td>
-      <td>${esc(am)}</td><td class="${path?'path':''}">${esc((v.call||'').split(' |')[0])}</td><td><b>${esc(v.combined)}</b></td>`;
+      <td>${esc(am)}</td><td class="${path?'path':''}">${esc((v.call||'').split(' |')[0])}</td>
+      <td><b>${esc(v.pheno_score == null ? '—' : Number(v.pheno_score).toFixed(3))}</b><br>
+      <span style="font-size:11px">${esc(v.pheno_disease || 'sin enfermedad coincidente')}</span><br>
+      <span style="font-size:10px;color:#7f8c8d">${esc(v.pheno_shared || 'sin HPO compartidos')}</span></td>
+      <td><b>${esc(v.combined)}</b></td>`;
     tb.appendChild(tr);
   });
   $('results').style.display = 'block';
