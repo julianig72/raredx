@@ -43,7 +43,7 @@ MAX_HPO_CHARS = max(1000, int(os.environ.get("RAREDX_MAX_HPO_CHARS", "10000")))
 MAX_SAMPLE_CHARS = max(32, int(os.environ.get("RAREDX_MAX_SAMPLE_CHARS", "200")))
 MAX_LLM_REQUESTS = max(1, int(os.environ.get("RAREDX_MAX_LLM_REQUESTS", "2")))
 MAX_VARIANTS = max(1, int(os.environ.get("RAREDX_MAX_VARIANTS", "50000")))
-JOB_TIMEOUT_SECONDS = max(60, int(os.environ.get("RAREDX_JOB_TIMEOUT_SECONDS", "3600")))
+JOB_TIMEOUT_SECONDS = max(60, int(os.environ.get("RAREDX_JOB_TIMEOUT_SECONDS", "7200")))
 
 
 @asynccontextmanager

@@ -74,7 +74,7 @@ docker run -p 8000:8000 -v raredx_data:/data \
 | `RAREDX_MAX_SAMPLE_CHARS` | `200` | Longitud máxima del identificador de muestra. |
 | `RAREDX_MAX_LLM_REQUESTS` | `2` | Extracciones HPO simultáneas. |
 | `RAREDX_MAX_VARIANTS` | `50000` | Máximo de alelos llamados en la muestra que procesa un trabajo. |
-| `RAREDX_JOB_TIMEOUT_SECONDS` | `3600` | Límite total de ejecución por análisis. |
+| `RAREDX_JOB_TIMEOUT_SECONDS` | `7200` | Límite total de ejecución por análisis (2 horas). |
 | `GH_TOKEN` / `COPILOT_GITHUB_TOKEN` | sesión local | Autenticación GitHub para Copilot en servidores/contenedores. |
 | `PORT` | `8000` | Puerto del servidor. |
 | `ANTHROPIC_API_KEY` | — | Fallback opcional si Copilot no está disponible. |
