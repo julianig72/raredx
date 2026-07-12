@@ -27,10 +27,32 @@
   .tog input{width:16px;height:16px}
   button.go{background:#16a085;color:#fff;border:0;border-radius:8px;padding:13px 26px;font-size:15px;font-weight:600;cursor:pointer;margin-top:18px}
   button.go:disabled{background:#b6c2d0;cursor:not-allowed}
+  button.extract{background:#8e44ad;color:#fff;border:0;border-radius:7px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;margin-top:8px}
+  button.extract:disabled{background:#b6c2d0;cursor:not-allowed}
+  button.cancel{display:none;background:#c0392b;color:#fff;border:0;border-radius:8px;padding:13px 20px;font-size:14px;font-weight:600;cursor:pointer;margin:18px 0 0 8px}
+  button.cancel:disabled{background:#d7b1ad;cursor:not-allowed}
+  .extract-status{font-size:12px;color:#7f8c8d;margin-left:8px}
+  .hpo-review{display:none;background:#f8f4fc;border:1px solid #dfccef;border-radius:8px;padding:10px 13px;margin-top:9px}
+  .hpo-item{display:block;font-weight:400;margin:7px 0;color:#34495e}
+  .hpo-item input{margin-right:7px}
+  .hpo-item small{display:block;color:#7f8c8d;margin-left:24px}
+  .expanded-review{display:none;background:#f4f8fb;border:1px solid #d5e3ed;border-radius:8px;padding:10px 13px;margin-top:9px}
+  .expanded-item{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #e8eef3;font-size:12.5px}
+  .expanded-item:last-child{border-bottom:0}
+  .expanded-item .term{flex:1}
+  .expanded-item .kind{font-size:10px;text-transform:uppercase;color:#7f8c8d;background:#e8eef3;border-radius:9px;padding:2px 7px}
+  .expanded-item .kind.direct{color:#6c3483;background:#f0e5f7}
+  .expanded-item button{border:0;background:transparent;color:#c0392b;font-size:18px;cursor:pointer;padding:0 5px}
+  .hpo-add{display:flex;gap:8px;margin-top:10px}
+  .hpo-add input{flex:1}
+  .hpo-add button{border:0;background:#2980b9;color:#fff;border-radius:6px;padding:7px 12px;cursor:pointer}
   .prog{display:none;margin-top:16px}
   .bar{height:9px;background:#e4e9ef;border-radius:6px;overflow:hidden}
   .bar > i{display:block;height:100%;width:0;background:linear-gradient(90deg,#16a085,#1abc9c);transition:width .4s}
   .pmsg{font-size:13px;color:#7f8c8d;margin-top:7px}
+  .pmeta{font-size:11.5px;color:#95a5a6;margin-top:4px;line-height:1.55}
+  .pmeta b{color:#5d6d7e;font-weight:600}
+  .psources{white-space:normal}
   .results{display:none}
   table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px}
   th{background:#eef1f5;text-align:left;padding:7px;font-size:9.5px;text-transform:uppercase;color:#7f8c8d}
@@ -63,20 +85,38 @@ método ortogonal (Sanger) y ser interpretado por un genetista clínico con el c
 
 <div class="card" id="form-card">
   <label>Archivo VCF <span class="h">— del paciente (máx. 50 MB)</span></label>
-  <div class="drop" id="drop">Arrastra el VCF aquí o haz clic para seleccionar<input type="file" id="vcf" accept=".vcf,.txt" hidden></div>
+  <div class="drop" id="drop"><span id="droptext">Arrastra el VCF aquí o haz clic para seleccionar</span><input type="file" id="vcf" accept=".vcf,.txt" hidden></div>
 
   <div class="row">
     <div><label>ID de muestra</label><input type="text" id="sample" placeholder="p. ej. PACIENTE_001"></div>
     <div><label>Ensamblaje del genoma</label>
-      <select id="assembly"><option value="GRCh38">GRCh38 / hg38</option><option value="GRCh37">GRCh37 / hg19</option></select>
+      <select id="assembly">
+        <option value="auto">Detectar automáticamente</option>
+        <option value="GRCh38">Forzar GRCh38 / hg38</option>
+        <option value="GRCh37">Forzar GRCh37 / hg19</option>
+      </select>
+      <span class="extract-status" id="assemblystatus"></span>
     </div>
   </div>
 
-  <label>Nota clínica <span class="h">— texto libre; un LLM extrae los fenotipos (opcional)</span></label>
+  <label>Nota clínica <span class="h">— texto libre; extrae y revisa los fenotipos antes de analizar</span></label>
   <textarea id="note" placeholder="p. ej. Varón de 10 meses con convulsiones de inicio focal, retraso del desarrollo…"></textarea>
+  <button type="button" class="extract" id="extracthpo">Extraer HPO con Copilot</button>
+  <span class="extract-status" id="extractstatus"></span>
+  <div class="hpo-review" id="hporeview"></div>
 
-  <label>Términos HPO <span class="h">— IDs (HP:0001250) o texto, separados por comas (opcional)</span></label>
+  <label>Términos HPO revisados <span class="h">— desmarca arriba o edita aquí antes de analizar</span></label>
   <input type="text" id="hpo" placeholder="HP:0001250, Epileptic encephalopathy, Infantile spasms">
+  <button type="button" class="extract" id="expandhpo">Expandir y revisar HPO</button>
+  <span class="extract-status" id="expandstatus"></span>
+  <div class="expanded-review" id="expandedreview">
+    <b>Perfil HPO expandido que se usará para buscar coincidencias:</b>
+    <div id="expandedlist"></div>
+    <div class="hpo-add">
+      <input type="text" id="addhpo" placeholder="Añadir HP:0000000 o término clínico">
+      <button type="button" id="addhpobtn">Añadir</button>
+    </div>
+  </div>
 
   <label>Capas de IA para variantes missense</label>
   <div class="toggles">
@@ -104,15 +144,18 @@ método ortogonal (Sanger) y ser interpretado por un genetista clínico con el c
   </div>
 
   <button class="go" id="go">Analizar VCF</button>
+  <button type="button" class="cancel" id="cancel">Detener análisis</button>
 
   <div class="prog" id="prog">
     <div class="bar"><i id="barfill"></i></div>
     <div class="pmsg" id="pmsg">Iniciando…</div>
+    <div class="pmeta" id="pmeta"></div>
   </div>
   <div class="err" id="err"></div>
 </div>
 
 <div class="card results" id="results">
+  <div class="disc" id="warnings" style="display:none"></div>
   <div id="diffwrap" style="display:none">
     <h2 style="margin:0 0 8px;font-size:16px">🧬 Diagnóstico diferencial <span style="color:#95a5a6;font-weight:400;font-size:12px">— razonamiento agéntico</span></h2>
     <div id="diffbody"></div>
@@ -133,10 +176,27 @@ método ortogonal (Sanger) y ser interpretado por un genetista clínico con el c
 
 <script>
 const $ = id => document.getElementById(id);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => (
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+));
+const safeUrl = value => {
+  try {
+    const url = new URL(String(value), window.location.origin);
+    return ['http:','https:'].includes(url.protocol) ? url.href : '#';
+  } catch {
+    return '#';
+  }
+};
 $('agentic').addEventListener('change', e => {
   $('reflectkwrap').style.display = e.target.checked ? 'block' : 'none';
 });
 let file = null;
+let extractedNote = '';
+let extractedHpoIds = new Set();
+let expandedHpoTerms = [];
+let expandedFor = '';
+let removedExpandedHpoIds = new Set();
+let activeJob = null;
 
 const drop = $('drop');
 drop.onclick = () => $('vcf').click();
@@ -144,10 +204,202 @@ $('vcf').onchange = e => { file = e.target.files[0]; if (file) markFile(); };
 ['dragover','dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
 drop.addEventListener('drop', e => { file = e.dataTransfer.files[0]; if (file) markFile(); });
-function markFile(){ drop.classList.add('has'); drop.textContent = '📄 ' + file.name + ' (' + (file.size/1048576).toFixed(1) + ' MB)'; }
+function markFile(){
+  drop.classList.add('has');
+  $('droptext').textContent = '📄 ' + file.name + ' (' + (file.size/1048576).toFixed(1) + ' MB)';
+  $('assemblystatus').textContent = '';
+}
+
+$('note').addEventListener('input', () => {
+  if (extractedNote && $('note').value !== extractedNote) {
+    $('extractstatus').textContent = 'Nota modificada: vuelve a extraer para actualizar los HPO.';
+  }
+});
+$('hpo').addEventListener('input', markExpansionStale);
+
+function markExpansionStale() {
+  if (expandedFor && $('hpo').value.trim() !== expandedFor) {
+    expandedFor = '';
+    $('expandstatus').textContent = 'Lista modificada: vuelve a expandir para revisar el perfil.';
+  }
+}
+
+$('extracthpo').onclick = async () => {
+  const note = $('note').value.trim();
+  if (!note) { showErr('Escribe una nota clínica antes de extraer HPO.'); return; }
+  hideErr();
+  $('extracthpo').disabled = true;
+  $('extractstatus').textContent = 'Extrayendo fenotipos…';
+  const fd = new FormData();
+  fd.append('clinical_note', note);
+  try {
+    const response = await fetch('/api/extract-hpo', {method:'POST', body:fd});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || response.statusText);
+    renderHpoReview(payload.terms || []);
+    extractedNote = $('note').value;
+    const provider = (payload.llm_providers || []).join(', ');
+    const warnings = payload.warnings || [];
+    $('extractstatus').textContent = `${(payload.terms || []).length} términos extraídos${provider ? ' con ' + provider : ''}.`
+      + (warnings.length ? ` Aviso: ${warnings.join('; ')}` : '');
+    removedExpandedHpoIds.clear();
+    await expandReviewedHpo();
+  } catch (e) {
+    showErr('Error al extraer HPO: ' + e.message);
+    $('extractstatus').textContent = '';
+  } finally {
+    $('extracthpo').disabled = false;
+  }
+};
+
+function renderHpoReview(terms) {
+  const review = $('hporeview');
+  const existing = $('hpo').value.split(',').map(t => t.trim()).filter(Boolean);
+  const manual = existing.filter(term => !extractedHpoIds.has(term));
+  extractedHpoIds = new Set(terms.map(term => term.hpo_id));
+  review.replaceChildren();
+  review.style.display = 'block';
+  if (!terms.length) {
+    review.textContent = 'No se encontraron fenotipos explícitos en la nota.';
+    $('hpo').value = manual.join(', ');
+    return;
+  }
+  const title = document.createElement('b');
+  title.textContent = 'Revisa los términos que se usarán en el análisis:';
+  review.appendChild(title);
+  terms.forEach(term => {
+    const label = document.createElement('label');
+    label.className = 'hpo-item';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = true;
+    checkbox.dataset.hpoId = term.hpo_id;
+    checkbox.addEventListener('change', () => syncReviewedHpo());
+    const text = document.createElement('span');
+    text.textContent = `${term.label} (${term.hpo_id})`;
+    label.append(checkbox, text);
+    if (term.note_evidence) {
+      const evidence = document.createElement('small');
+      evidence.textContent = `Evidencia: “${term.note_evidence}”`;
+      label.appendChild(evidence);
+    }
+    review.appendChild(label);
+  });
+  syncReviewedHpo(manual);
+}
+
+function syncReviewedHpo(preservedManual = null) {
+  const current = $('hpo').value.split(',').map(t => t.trim()).filter(Boolean);
+  const manual = preservedManual || current.filter(term => !extractedHpoIds.has(term));
+  const selected = [...$('hporeview').querySelectorAll('input[type=checkbox]:checked')]
+    .map(input => input.dataset.hpoId);
+  $('hpo').value = [...new Set([...manual, ...selected])].join(', ');
+  markExpansionStale();
+}
+
+$('expandhpo').onclick = () => {
+  removedExpandedHpoIds.clear();
+  expandReviewedHpo();
+};
+$('addhpobtn').onclick = async () => {
+  const term = $('addhpo').value.trim();
+  if (!term) return;
+  await expandReviewedHpo(term);
+  $('addhpo').value = '';
+};
+
+async function expandReviewedHpo(additionalTerm = '') {
+  const existing = $('hpo').value.split(',').map(term => term.trim()).filter(Boolean);
+  const requested = [...new Set([...existing, additionalTerm].filter(Boolean))];
+  if (!requested.length) {
+    expandedHpoTerms = [];
+    expandedFor = '';
+    renderExpandedHpo();
+    $('expandstatus').textContent = 'No hay términos que expandir.';
+    return;
+  }
+  $('expandhpo').disabled = true;
+  $('addhpobtn').disabled = true;
+  $('expandstatus').textContent = 'Expandiendo ontología HPO…';
+  const fd = new FormData();
+  fd.append('hpo', requested.join(', '));
+  try {
+    const response = await fetch('/api/expand-hpo', {method:'POST', body:fd});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || response.statusText);
+    const terms = payload.terms || [];
+    const direct = terms.filter(term => term.kind === 'direct').map(term => term.hpo_id);
+    $('hpo').value = [...new Set(direct)].join(', ');
+    expandedFor = $('hpo').value.trim();
+    expandedHpoTerms = terms.filter(term =>
+      term.kind === 'direct' || !removedExpandedHpoIds.has(term.hpo_id)
+    );
+    renderExpandedHpo();
+    const warning = (payload.warnings || []).join('; ');
+    $('expandstatus').textContent = `${expandedHpoTerms.length} términos revisables`
+      + (warning ? `. Aviso: ${warning}` : '.');
+  } catch (error) {
+    expandedFor = '';
+    showErr('Error al expandir HPO: ' + error.message);
+    $('expandstatus').textContent = '';
+  } finally {
+    $('expandhpo').disabled = false;
+    $('addhpobtn').disabled = false;
+  }
+}
+
+function renderExpandedHpo() {
+  const review = $('expandedreview');
+  const list = $('expandedlist');
+  list.replaceChildren();
+  review.style.display = expandedHpoTerms.length ? 'block' : 'none';
+  expandedHpoTerms.forEach(term => {
+    const row = document.createElement('div');
+    row.className = 'expanded-item';
+    const text = document.createElement('span');
+    text.className = 'term';
+    text.textContent = `${term.label} (${term.hpo_id})`;
+    const kind = document.createElement('span');
+    kind.className = 'kind ' + (term.kind === 'direct' ? 'direct' : '');
+    kind.textContent = term.kind === 'direct' ? 'directo' : 'ancestro';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.title = 'Eliminar del perfil HPO';
+    remove.textContent = '×';
+    remove.onclick = () => removeExpandedHpo(term);
+    row.append(text, kind, remove);
+    list.appendChild(row);
+  });
+}
+
+function removeExpandedHpo(term) {
+  removedExpandedHpoIds.add(term.hpo_id);
+  if (term.kind === 'direct') {
+    const remainingDirect = $('hpo').value.split(',').map(value => value.trim())
+      .filter(value => value && value !== term.hpo_id);
+    $('hpo').value = remainingDirect.join(', ');
+    expandedFor = $('hpo').value.trim();
+    expandedHpoTerms = expandedHpoTerms.map(item => ({
+      ...item,
+      source_hpo_ids: (item.source_hpo_ids || []).filter(source => source !== term.hpo_id),
+    })).filter(item => item.source_hpo_ids.length && item.hpo_id !== term.hpo_id);
+  } else {
+    expandedHpoTerms = expandedHpoTerms.filter(item => item.hpo_id !== term.hpo_id);
+  }
+  renderExpandedHpo();
+  $('expandstatus').textContent = `${expandedHpoTerms.length} términos en el perfil revisado.`;
+}
 
 $('go').onclick = async () => {
   if (!file) { showErr('Selecciona un archivo VCF primero.'); return; }
+  if ($('note').value.trim() && extractedNote !== $('note').value) {
+    showErr('Extrae y revisa los HPO de la nota clínica antes de analizar.');
+    return;
+  }
+  if ($('hpo').value.trim() && expandedFor !== $('hpo').value.trim()) {
+    showErr('Expande y revisa el perfil HPO antes de analizar.');
+    return;
+  }
   hideErr(); $('results').style.display = 'none';
   $('go').disabled = true; $('prog').style.display = 'block'; setBar(3, 'Subiendo VCF…');
 
@@ -155,7 +407,8 @@ $('go').onclick = async () => {
   fd.append('vcf', file);
   fd.append('sample', $('sample').value || 'SAMPLE');
   fd.append('hpo', $('hpo').value);
-  fd.append('clinical_note', $('note').value);
+  fd.append('expanded_hpo', expandedHpoTerms.map(term => term.hpo_id).join(','));
+  fd.append('clinical_note', '');
   fd.append('assembly', $('assembly').value);
   fd.append('esm', $('esm').checked);
   fd.append('alphamissense', $('am').checked);
@@ -168,28 +421,77 @@ $('go').onclick = async () => {
   try {
     const r = await fetch('/api/analyze', { method:'POST', body:fd });
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
-    job = (await r.json()).job_id;
+    const payload = await r.json();
+    job = payload.job_id;
+    activeJob = job;
+    $('cancel').style.display = 'inline-block';
+    $('cancel').disabled = false;
+    $('cancel').textContent = 'Detener análisis';
+    $('assemblystatus').textContent = `Detectado: ${payload.assembly}${payload.assembly === 'GRCh38' ? ' / hg38' : ' / hg19'}`;
   } catch (e) { fail(e.message); return; }
   poll(job);
 };
 
 function poll(job){
-  const iv = setInterval(async () => {
+  let failures = 0;
+  const tick = async () => {
     let s;
-    try { s = await (await fetch('/api/status/' + job)).json(); }
-    catch { return; }
-    if (s.status === 'error') { clearInterval(iv); fail(s.message); return; }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch('/api/status/' + encodeURIComponent(job), {signal:controller.signal});
+      if (!response.ok) throw new Error(response.statusText);
+      s = await response.json();
+      failures = 0;
+    } catch {
+      failures += 1;
+      if (failures >= 5) { fail('No se pudo consultar el estado del análisis.'); return; }
+      setTimeout(tick, 1200);
+      return;
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (s.status === 'error') { fail(s.message); return; }
+    if (s.status === 'cancelled') { stopped(s.message || 'Análisis detenido.'); return; }
     setBar(Math.max(s.percent, 5), s.message || 'Procesando…');
-    if (s.status === 'done') { clearInterval(iv); done(job, s); }
-  }, 1200);
+    renderProgressMeta(s);
+    if (s.status === 'done') { done(job, s); return; }
+    setTimeout(tick, 1200);
+  };
+  tick();
 }
+
+$('cancel').onclick = async () => {
+  if (!activeJob) return;
+  $('cancel').disabled = true;
+  $('cancel').textContent = 'Deteniendo…';
+  try {
+    const response = await fetch('/api/cancel/' + encodeURIComponent(activeJob), {method:'POST'});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || response.statusText);
+    $('pmsg').textContent = 'Deteniendo análisis…';
+  } catch (error) {
+    $('cancel').disabled = false;
+    $('cancel').textContent = 'Detener análisis';
+    showErr('No se pudo detener el análisis: ' + error.message);
+  }
+};
 
 function done(job, s){
   setBar(100, 'Análisis completo');
   $('go').disabled = false;
+  $('cancel').style.display = 'none';
+  activeJob = null;
   $('repbtn').href = '/api/report/' + job;
   $('csvbtn').href = '/api/csv/' + job;
-  $('nvar').textContent = '· ' + s.n_variants + ' variantes analizadas';
+  const providers = s.llm_providers || [];
+  $('nvar').textContent = '· ' + s.n_variants + ' variantes analizadas'
+    + (providers.length ? ' · LLM: ' + providers.join(', ') : '');
+  const warnings = s.warnings || [];
+  $('warnings').style.display = warnings.length ? 'block' : 'none';
+  $('warnings').innerHTML = warnings.length
+    ? '<b>Advertencias de datos:</b><ul>' + warnings.map(w => `<li>${esc(w)}</li>`).join('') + '</ul>'
+    : '';
 
   // differential (agentic layer), if present
   const diff = s.differential || [];
@@ -197,16 +499,17 @@ function done(job, s){
   if (diff.length) {
     db.innerHTML = '';
     diff.forEach((d, i) => {
-      const lk = (d.likelihood || 'low').toLowerCase();
+      const rawLevel = String(d.likelihood || 'low').toLowerCase();
+      const lk = ['high','moderate','low'].includes(rawLevel) ? rawLevel : 'low';
       const links = (d.evidence || []).map(e =>
-        `<a href="${e.url}" target="_blank">${e.label} ↗</a>`).join('');
+        `<a href="${esc(safeUrl(e.url))}" target="_blank" rel="noopener noreferrer">${esc(e.label)} ↗</a>`).join('');
       const el = document.createElement('div');
       el.className = 'dx ' + lk;
       el.innerHTML =
-        `<h3>${i+1}. ${d.disease || '?'} <span class="lk" style="color:${lk==='high'?'#c0392b':lk==='moderate'?'#e67e22':'#7f8c8d'}">· ${lk}</span></h3>
-         <div class="meta"><b>Gen(es):</b> ${(d.genes||[]).join(', ')} · <b>Herencia:</b> ${d.inheritance||'?'} · <b>Variante(s):</b> ${(d.supporting_variants||[]).join('; ')}</div>
-         <div class="rat">${d.rationale||''}</div>
-         <div class="nx"><b>Siguiente paso:</b> ${d.next_steps||''}</div>
+        `<h3>${i+1}. ${esc(d.disease || '?')} <span class="lk" style="color:${lk==='high'?'#c0392b':lk==='moderate'?'#e67e22':'#7f8c8d'}">· ${esc(lk)}</span></h3>
+         <div class="meta"><b>Gen(es):</b> ${esc((d.genes||[]).join(', '))} · <b>Herencia:</b> ${esc(d.inheritance||'?')} · <b>Variante(s):</b> ${esc((d.supporting_variants||[]).join('; '))}</div>
+         <div class="rat">${esc(d.rationale||'')}</div>
+         <div class="nx"><b>Siguiente paso:</b> ${esc(d.next_steps||'')}</div>
          <div class="lnk">${links || '<span style="font-size:11px;color:#95a5a6">(sin enlaces verificados)</span>'}</div>`;
       db.appendChild(el);
     });
@@ -219,18 +522,57 @@ function done(job, s){
   (s.top || []).forEach(v => {
     const path = /pathogenic/i.test(v.call || '') && !/benign/i.test(v.call || '');
     const am = (v.am_pathogenicity != null) ? Number(v.am_pathogenicity).toFixed(3) : '—';
-    const af = (v.af == null) ? 'ausente' : Number(v.af).toExponential(1);
+    const af = v.af_status === 'unavailable'
+      ? 'no disponible'
+      : (v.af == null) ? 'ausente' : Number(v.af).toExponential(1);
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${v.rank}</td><td><b>${v.gene || '—'}</b></td><td>${(v.consequence||'').replace(/_/g,' ')}</td>
-      <td>${v.protein || '—'}</td><td>${af}</td><td>${v.clinvar || '—'}</td>
-      <td>${am}</td><td class="${path?'path':''}">${(v.call||'').split(' |')[0]}</td><td><b>${v.combined}</b></td>`;
+    tr.innerHTML = `<td>${esc(v.rank)}</td><td><b>${esc(v.gene || '—')}</b></td><td>${esc((v.consequence||'').replace(/_/g,' '))}</td>
+      <td>${esc(v.protein || '—')}</td><td>${esc(af)}</td><td>${esc(v.clinvar || '—')}</td>
+      <td>${esc(am)}</td><td class="${path?'path':''}">${esc((v.call||'').split(' |')[0])}</td><td><b>${esc(v.combined)}</b></td>`;
     tb.appendChild(tr);
   });
   $('results').style.display = 'block';
 }
 
 function setBar(p, m){ $('barfill').style.width = p + '%'; $('pmsg').textContent = m; }
-function fail(m){ $('go').disabled = false; $('prog').style.display = 'none'; showErr('Error: ' + m); }
+function formatDuration(seconds) {
+  if (seconds == null || !Number.isFinite(Number(seconds))) return 'calculando…';
+  let remaining = Math.max(0, Math.round(Number(seconds)));
+  const hours = Math.floor(remaining / 3600);
+  remaining %= 3600;
+  const minutes = Math.floor(remaining / 60);
+  const secs = remaining % 60;
+  if (hours) return `${hours} h ${minutes} min`;
+  if (minutes) return `${minutes} min ${secs} s`;
+  return `${secs} s`;
+}
+function renderProgressMeta(s) {
+  const parts = [
+    `<b>${esc(s.percent ?? 0)}%</b>`,
+    `${esc(s.done ?? 0)} de ${esc(s.total ?? 0)} variantes`,
+    `transcurrido: <b>${esc(formatDuration(s.elapsed_seconds))}</b>`,
+    `ritmo: <b>${s.rate_per_minute == null ? 'calculando…' : esc(s.rate_per_minute) + ' variantes/min'}</b>`,
+    `restante aprox.: <b>${esc(formatDuration(s.eta_seconds))}</b>`,
+    `última actualización: hace ${esc(formatDuration(s.last_update_seconds))}`,
+  ];
+  const sources = (s.layers || []).map(esc).join(' · ');
+  $('pmeta').innerHTML = parts.join(' &nbsp;·&nbsp; ')
+    + (sources ? `<br><span class="psources"><b>Capas activas:</b> ${sources}</span>` : '');
+}
+function stopped(message) {
+  $('go').disabled = false;
+  $('cancel').style.display = 'none';
+  activeJob = null;
+  setBar(0, message);
+  $('pmeta').textContent = '';
+}
+function fail(m){
+  $('go').disabled = false;
+  $('cancel').style.display = 'none';
+  activeJob = null;
+  $('prog').style.display = 'none';
+  showErr('Error: ' + m);
+}
 function showErr(m){ $('err').style.display = 'block'; $('err').textContent = m; }
 function hideErr(){ $('err').style.display = 'none'; }
 </script>

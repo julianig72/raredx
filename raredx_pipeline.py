@@ -27,7 +27,7 @@ Requires: requests  (pip install requests)
 NOTE: run respectfully - the script paces requests. NCBI asks for a contact email;
 pass --email you@inst.org to be a good citizen (optional).
 """
-import argparse, json, sys, time, html, datetime, re
+import argparse, asyncio, json, sys, time, html, datetime, re, threading
 import requests
 
 ENSEMBL="https://rest.ensembl.org"
@@ -38,41 +38,226 @@ OLS="https://www.ebi.ac.uk/ols4/api"
 UA={"User-Agent":"raredx-pipeline","Accept":"application/json"}
 LOF_TERMS={"stop_gained","frameshift_variant","splice_acceptor_variant",
            "splice_donor_variant","start_lost","stop_lost","transcript_ablation"}
+_REQUEST_STATE=threading.local()
+
+
+class AnalysisCancelled(RuntimeError):
+    pass
+
+
+def set_request_deadline(deadline=None):
+    _REQUEST_STATE.deadline=deadline
+
+
+def set_request_cancel_event(event=None):
+    _REQUEST_STATE.cancel_event=event
+
+
+def _check_cancelled():
+    event=getattr(_REQUEST_STATE,"cancel_event",None)
+    if event is not None and event.is_set():
+        raise AnalysisCancelled("analysis cancelled by user")
+
+
+def _request_timeout():
+    _check_cancelled()
+    deadline=getattr(_REQUEST_STATE,"deadline",None)
+    if deadline is None:
+        return 30
+    remaining=deadline-time.monotonic()
+    if remaining<=0:
+        raise TimeoutError("analysis exceeded its configured wall-clock deadline")
+    return max(0.1,min(30,remaining))
+
+
+def _retry_wait(attempt):
+    _check_cancelled()
+    if attempt >= 3:
+        return
+    delay=1.5*(attempt+1)
+    deadline=getattr(_REQUEST_STATE,"deadline",None)
+    if deadline is not None:
+        remaining=deadline-time.monotonic()
+        if remaining<=0:
+            raise TimeoutError("analysis exceeded its configured wall-clock deadline")
+        delay=min(delay,remaining)
+    event=getattr(_REQUEST_STATE,"cancel_event",None)
+    if event is not None:
+        if event.wait(delay):
+            raise AnalysisCancelled("analysis cancelled by user")
+    else:
+        time.sleep(delay)
+
 
 def _get(url, **kw):
     for i in range(4):
         try:
-            r=requests.get(url, headers=UA, timeout=30, **kw)
-            if r.status_code==200: return r.json()
-            if r.status_code in (429,500,503): time.sleep(1.5*(i+1)); continue
+            r=requests.get(url, headers=UA, timeout=_request_timeout(), **kw)
+            if r.status_code==200:
+                return r.json()
+            if r.status_code in (408,425,429) or 500<=r.status_code<600:
+                _retry_wait(i)
+                continue
             return None
         except requests.RequestException:
-            time.sleep(1.0*(i+1))
+            _retry_wait(i)
     return None
 
 def _gql(url, query, variables=None):
     for i in range(4):
         try:
-            r=requests.post(url, json={"query":query,"variables":variables or {}}, headers=UA, timeout=30)
-            if r.status_code==200: return r.json()
-            time.sleep(1.5*(i+1))
+            r=requests.post(url, json={"query":query,"variables":variables or {}}, headers=UA,
+                            timeout=_request_timeout())
+            if r.status_code==200:
+                return r.json()
+            if r.status_code not in (408,425,429) and not 500<=r.status_code<600:
+                return None
+            _retry_wait(i)
         except requests.RequestException:
-            time.sleep(1.0*(i+1))
+            _retry_wait(i)
     return None
 
 # ---------- VCF ----------
-def parse_vcf(path):
-    out=[]
+class VCFParseError(ValueError):
+    pass
+
+
+ASSEMBLY_CONTIG_LENGTHS={
+    "GRCh38":{"1":248956422,"2":242193529,"X":156040895},
+    "GRCh37":{"1":249250621,"2":243199373,"X":155270560},
+}
+
+
+def detect_vcf_assembly(path):
+    """Detect GRCh37/GRCh38 from ##reference or assembly-specific contig lengths."""
+    references=[]
+    contigs={}
     with open(path) as fh:
         for line in fh:
-            if line.startswith("#"): continue
+            if line.startswith("##reference="):
+                references.append(line.split("=",1)[1].strip().lower())
+            elif line.startswith("##contig=<"):
+                id_match=re.search(r"(?:^|,)ID=([^,>]+)",line[10:])
+                length_match=re.search(r"(?:^|,)length=(\d+)",line[10:],re.I)
+                assembly_match=re.search(r"(?:^|,)assembly=([^,>]+)",line[10:],re.I)
+                if id_match and length_match:
+                    chrom=id_match.group(1)
+                    chrom=chrom[3:] if chrom.lower().startswith("chr") else chrom
+                    contigs[chrom.upper()]=int(length_match.group(1))
+                if assembly_match:
+                    references.append(assembly_match.group(1).strip().lower())
+            elif line.startswith("#CHROM"):
+                break
+    reference=" ".join(references)
+    aliases={
+        "GRCh38":("grch38","hg38","b38","hs38","hs38dh","gcf_000001405.38"),
+        "GRCh37":("grch37","hg19","b37","hs37d5","human_g1k_v37","gcf_000001405.25"),
+    }
+    matches={assembly for assembly,terms in aliases.items() if any(term in reference for term in terms)}
+    for assembly,lengths in ASSEMBLY_CONTIG_LENGTHS.items():
+        if any(contigs.get(chrom)==length for chrom,length in lengths.items()):
+            matches.add(assembly)
+    if len(matches)==1:
+        return matches.pop()
+    if len(matches)>1:
+        raise VCFParseError("VCF metadata contains conflicting genome assembly markers")
+    raise VCFParseError(
+        "could not detect genome assembly; add ##reference=GRCh38/GRCh37 or standard contig lengths"
+    )
+
+
+def _sample_for_alt(format_keys, sample_value, alt_index):
+    sample = dict(zip(format_keys, sample_value.split(":")))
+    gt = sample.get("GT")
+    if not gt:
+        return sample
+    sep = "|" if "|" in gt else "/"
+    normalized = []
+    for allele in gt.replace("|", "/").split("/"):
+        if allele == ".":
+            normalized.append(".")
+            continue
+        try:
+            normalized.append("1" if int(allele) == alt_index else "0")
+        except ValueError:
+            normalized.append(".")
+    sample["GT"] = sep.join(normalized)
+    return sample
+
+
+def _called_alt(sample):
+    gt=(sample or {}).get("GT")
+    if not gt:
+        return None
+    parts=gt.replace("|","/").split("/")
+    if any(part=="." for part in parts):
+        return None
+    try:
+        return any(int(part)>=1 for part in parts)
+    except ValueError:
+        return None
+
+
+def parse_vcf(path, sample=None, allow_empty=True, max_variants=None, called_only=False):
+    """Parse one record per ALT allele and select the requested sample when present."""
+    out=[]
+    header_seen=False
+    sample_names=[]
+    sample_col=None
+    with open(path) as fh:
+        for line_no,line in enumerate(fh,1):
+            if line.startswith("##"):
+                continue
+            if line.startswith("#CHROM"):
+                header=line.rstrip("\n").split("\t")
+                if len(header)<8:
+                    raise VCFParseError("invalid VCF header")
+                header_seen=True
+                sample_names=header[9:]
+                if sample_names:
+                    if len(sample_names)>1:
+                        if sample in (None,"","SAMPLE"):
+                            names=", ".join(sample_names[:10])
+                            suffix="..." if len(sample_names)>10 else ""
+                            raise VCFParseError(
+                                f"multi-sample VCF requires an explicit sample ID; available: {names}{suffix}"
+                            )
+                        if sample not in sample_names:
+                            raise VCFParseError(
+                                f"sample {sample!r} not found in multi-sample VCF"
+                            )
+                    sample_col=(sample_names.index(sample) if sample in sample_names else 0)+9
+                continue
+            if line.startswith("#") or not line.strip():
+                continue
+            if not header_seen:
+                raise VCFParseError("invalid VCF: missing #CHROM header")
             f=line.rstrip("\n").split("\t")
-            if len(f)<8: continue
-            rec=dict(chrom=f[0].replace("chr",""),pos=int(f[1]),rsid=f[2] if f[2]!="." else None,
-                     ref=f[3],alt=f[4].split(",")[0],qual=f[5],filter=f[6] or "PASS")
-            if len(f)>9:
-                rec["sample"]=dict(zip(f[8].split(":"),f[9].split(":")))
-            out.append(rec)
+            if len(f)<8:
+                raise VCFParseError(f"invalid VCF record at line {line_no}: expected at least 8 columns")
+            try:
+                pos=int(f[1])
+            except ValueError as exc:
+                raise VCFParseError(f"invalid VCF position at line {line_no}") from exc
+            if pos<1 or not f[3] or f[3]=="." or not f[4] or f[4]==".":
+                continue
+            chrom=f[0][3:] if f[0].lower().startswith("chr") else f[0]
+            for alt_index,alt in enumerate(f[4].split(","),1):
+                if not alt or alt=="." or alt=="*" or alt.startswith("<") or "[" in alt or "]" in alt:
+                    continue
+                rec=dict(chrom=chrom,pos=pos,rsid=f[2] if f[2]!="." else None,
+                         ref=f[3],alt=alt,qual=f[5],filter=f[6] or "PASS")
+                if sample_col is not None and len(f)>sample_col:
+                    rec["sample"]=_sample_for_alt(f[8].split(":"),f[sample_col],alt_index)
+                    if called_only and _called_alt(rec["sample"]) is not True:
+                        continue
+                out.append(rec)
+                if max_variants is not None and len(out)>max_variants:
+                    raise VCFParseError(f"VCF exceeds the {max_variants} variant analysis limit")
+    if not header_seen:
+        raise VCFParseError("invalid VCF: missing #CHROM header")
+    if not out and not allow_empty:
+        raise VCFParseError("VCF contains no supported variant records")
     return out
 
 # ---------- annotation ----------
@@ -86,73 +271,172 @@ def vep(rec, assembly="GRCh38"):
     params={"content-type":"application/json"}
     if assembly=="GRCh37": params.update({"AF_gnomade":1,"AF_gnomadg":1,"sift":1,"polyphen":1})
     j=_get(url, params=params)
-    if not j: return {}
+    if not j: return {"annotation_available":False}
     r=j[0]
     tcs=r.get("transcript_consequences") or []
-    sift=poly=None; aa=None; gene=None; gid=None
-    # canonical first, else most severe
-    ranked=sorted(tcs, key=lambda t:(-int(t.get("canonical",0)),))
-    for t in ranked:
-        gene=gene or t.get("gene_symbol"); gid=gid or t.get("gene_id")
-        if t.get("sift_prediction") and not sift: sift=t["sift_prediction"]
-        if t.get("polyphen_prediction") and not poly: poly=t["polyphen_prediction"]
-        if t.get("amino_acids") and not aa: aa=t["amino_acids"]
+    most_severe=r.get("most_severe_consequence")
+    severe=[t for t in tcs if most_severe in (t.get("consequence_terms") or [])]
+    ranked=sorted(severe or tcs,key=lambda t:-int(t.get("canonical",0) or 0))
+    representative=ranked[0] if ranked else {}
+    gene=representative.get("gene_symbol")
+    gid=representative.get("gene_id")
+    sift=representative.get("sift_prediction")
+    poly=representative.get("polyphen_prediction")
+    aa=representative.get("amino_acids")
     # gnomAD AF from colocated frequencies (populated on the GRCh37 endpoint)
     gaf=None
     for cv in (r.get("colocated_variants") or []):
-        fr=cv.get("frequencies")
-        if fr:
-            for _al,d in fr.items():
-                for k in ("gnomade","gnomadg","gnomad"):
-                    if d.get(k) is not None and gaf is None: gaf=d[k]
-    return dict(most_severe=r.get("most_severe_consequence"),gene=gene,gene_id=gid,
+        fr=cv.get("frequencies") or {}
+        d=fr.get(rec["alt"]) or fr.get(rec["alt"].upper())
+        if d:
+            vals=[d.get(k) for k in ("gnomade","gnomadg","gnomad") if d.get(k) is not None]
+            if vals:
+                gaf=max(vals) if gaf is None else max(gaf,*vals)
+    return dict(most_severe=most_severe,gene=gene,gene_id=gid,
                 amino_acids=aa,sift=sift,polyphen=poly,gnomad_af=gaf,
+                annotation_available=True,
                 colocated=[c.get("id") for c in (r.get("colocated_variants") or []) if str(c.get("id","")).startswith("rs")])
 
 GNOMAD_VAR_Q="""query($vid:String!,$ds:DatasetId!){
  variant(variantId:$vid, dataset:$ds){ exome{af homozygote_count} genome{af homozygote_count} } }"""
-def gnomad_af(rec):
+def gnomad_af(rec, return_status=False):
     vid=f'{rec["chrom"]}-{rec["pos"]}-{rec["ref"]}-{rec["alt"]}'
     j=_gql(GNOMAD, GNOMAD_VAR_Q, {"vid":vid,"ds":"gnomad_r4"})
-    v=((j or {}).get("data") or {}).get("variant")
-    if not v: return None
+    if not isinstance(j,dict):
+        return (None,False) if return_status else None
+    v=(j.get("data") or {}).get("variant")
+    if j.get("errors") and not v:
+        return (None,False) if return_status else None
+    if not v:
+        return (None,True) if return_status else None
     afs=[x.get("af") for x in (v.get("exome"),v.get("genome")) if x and x.get("af") is not None]
-    return max(afs) if afs else None
+    af=max(afs) if afs else None
+    return (af,True) if return_status else af
 
 GNOMAD_CONS_Q="""query($sym:String!){ gene(gene_symbol:$sym, reference_genome:GRCh38){
   gnomad_constraint{ pli oe_lof_upper } } }"""
 def gnomad_constraint(sym, cache):
     if sym in cache: return cache[sym]
     j=_gql(GNOMAD, GNOMAD_CONS_Q, {"sym":sym})
+    gene=((j or {}).get("data") or {}).get("gene") if isinstance(j,dict) else None
+    available=isinstance(j,dict) and not (j.get("errors") and not gene)
     c=(((j or {}).get("data") or {}).get("gene") or {}).get("gnomad_constraint") or {}
-    cache[sym]={"pli":c.get("pli"),"loeuf":c.get("oe_lof_upper")}
+    cache[sym]={"pli":c.get("pli"),"loeuf":c.get("oe_lof_upper"),"available":available}
     return cache[sym]
 
-def clinvar(rec, email=None):
-    """ClinVar via E-utilities: esearch by rsid or chrom/pos, esummary for significance+stars."""
+def _clinvar_stars(doc):
+    rs=((doc.get("germline_classification") or {}).get("review_status") or "").lower()
+    return (4 if "practice guideline" in rs else 3 if "expert panel" in rs
+            else 2 if "multiple" in rs and "conflict" not in rs else 1 if "single" in rs else 0)
+
+
+def _normalized_vcf_allele(rec):
+    pos0=int(rec["pos"])-1
+    ref=str(rec["ref"]).upper()
+    alt=str(rec["alt"]).upper()
+    while ref and alt and ref[0]==alt[0]:
+        ref=ref[1:]
+        alt=alt[1:]
+        pos0+=1
+    while ref and alt and ref[-1]==alt[-1]:
+        ref=ref[:-1]
+        alt=alt[:-1]
+    return pos0,ref,alt
+
+
+def _clinvar_matches_allele(doc, rec, assembly):
+    vcf_pos0,vcf_ref,vcf_alt=_normalized_vcf_allele(rec)
+    for variation in doc.get("variation_set") or []:
+        locations=variation.get("variation_loc") or []
+        location_match=any(
+            loc.get("assembly_name")==assembly
+            and str(loc.get("chr","")).removeprefix("chr")==str(rec["chrom"]).removeprefix("chr")
+            and min(int(loc.get("start") or 0),int(loc.get("stop") or loc.get("start") or 0))
+                <= vcf_pos0+1
+                <= max(int(loc.get("start") or 0),int(loc.get("stop") or loc.get("start") or 0))
+            for loc in locations
+        )
+        spdi=variation.get("canonical_spdi") or ""
+        parts=spdi.rsplit(":",3)
+        if len(parts)!=4:
+            continue
+        try:
+            spdi_pos0=int(parts[-3])
+        except ValueError:
+            continue
+        allele_match=parts[-2].upper()==vcf_ref and parts[-1].upper()==vcf_alt
+        position_match=(spdi_pos0==vcf_pos0 if assembly=="GRCh38" else location_match)
+        if position_match and allele_match:
+            return True
+    return False
+
+
+def clinvar(rec, email=None, assembly="GRCh38"):
+    """Return ClinVar evidence only when its genomic placement and allele match the VCF."""
     params={"db":"clinvar","retmode":"json"}
     if email: params["email"]=email
-    term=f'{rec["rsid"]}' if rec.get("rsid") else f'{rec["chrom"]}[chr] AND {rec["pos"]}[chrpos37] OR {rec["pos"]}[chrpos38]'
-    es=_get(f"{EUTILS}/esearch.fcgi", params={**params,"term":term})
+    term=(f'{rec["rsid"]}[All Fields]' if rec.get("rsid")
+          else f'{rec["chrom"]}[chr] AND ({rec["pos"]}[chrpos37] OR {rec["pos"]}[chrpos38])')
+    es=_get(f"{EUTILS}/esearch.fcgi", params={**params,"term":term,"retmax":100})
+    if es is None:
+        return {"significance":None,"stars":0,"available":False}
     ids=(((es or {}).get("esearchresult") or {}).get("idlist")) or []
-    if not ids: return {"significance":None,"stars":0}
-    su=_get(f"{EUTILS}/esummary.fcgi", params={**params,"id":ids[0]})
-    doc=(((su or {}).get("result") or {}).get(ids[0])) or {}
+    if not ids:
+        return {"significance":None,"stars":0,"available":True}
+    su=_get(f"{EUTILS}/esummary.fcgi", params={**params,"id":",".join(ids)})
+    if su is None:
+        return {"significance":None,"stars":0,"available":False}
+    result=(su or {}).get("result") or {}
+    docs=[result.get(i) or {} for i in ids]
+    matches=[d for d in docs if _clinvar_matches_allele(d,rec,assembly)]
+    if not matches:
+        return {"significance":None,"stars":0,"available":True}
+    doc=max(matches,key=_clinvar_stars)
     germ=doc.get("germline_classification") or {}
     desc=germ.get("description")
-    rs=(germ.get("review_status") or "").lower()
-    stars=(4 if "practice guideline" in rs else 3 if "expert panel" in rs
-           else 2 if "multiple" in rs and "conflict" not in rs else 1 if "single" in rs else 0)
+    stars=_clinvar_stars(doc)
     conds=[t.get("trait_name") for t in (germ.get("trait_set") or []) if t.get("trait_name")]
     return {"significance":desc,"stars":stars,"conditions":conds[:3],
-            "protein_change":doc.get("protein_change")}
+            "protein_change":doc.get("protein_change"),"available":True}
 
 # ---------- classification ----------
-def classify(af, cons, pli, loeuf, sig, stars, sift, poly):
+def _call_from_tags(tags, sig=""):
+    codes={t[0] for t in tags}
+    if "BA1" in codes:
+        call="Benign"
+    elif "ClinVar_conflicting" in codes:
+        call="Uncertain significance (VUS)"
+    else:
+        points=0
+        points+=8 if "PVS1" in codes else 0
+        points+=4*len({"PS_ClinVar","PS2"}&codes)
+        points+=2*len({"PM2","PVS1_mod"}&codes)
+        points+=int("PP5_ClinVar" in codes)
+        points+=int(bool({"PP3","PP3_ESM","PP3_AM"}&codes))
+        points-=4*len({"BS1","BS_ClinVar"}&codes)
+        points-=int("BP6_ClinVar" in codes)
+        points-=int(bool({"BP4","BP4_ESM","BP4_AM"}&codes))
+        if points>=10:
+            call="Pathogenic"
+        elif points>=6:
+            call="Likely pathogenic"
+        elif points<=-7:
+            call="Benign"
+        elif points<=-2:
+            call="Likely benign"
+        else:
+            call="Uncertain significance (VUS)"
+    if "drug response" in (sig or "").lower():
+        call+=" | Pharmacogenomic (drug response)"
+    return call
+
+
+def classify(af, cons, pli, loeuf, sig, stars, sift, poly, af_available=True, extra_tags=None):
     tags=[]
     if af is not None and af>=0.05: tags.append(("BA1",f"gnomAD AF {af:.3f} >=5%"))
     elif af is not None and af>=0.01: tags.append(("BS1",f"gnomAD AF {af:.3f} >=1%"))
-    if af is None: tags.append(("PM2","absent from gnomAD r4"))
+    if not af_available: tags.append(("gnomAD_unavailable","gnomAD lookup unavailable; absence not assessed"))
+    elif af is None: tags.append(("PM2","absent from gnomAD r4"))
     elif af<1e-4: tags.append(("PM2",f"gnomAD AF {af:.2e} <0.01%"))
     lof_intol=(pli is not None and pli>=0.9) or (loeuf is not None and loeuf<0.6)
     if cons in LOF_TERMS:
@@ -162,20 +446,15 @@ def classify(af, cons, pli, loeuf, sig, stars, sift, poly):
         tags.append(("PP3",f"SIFT {sift} & PolyPhen {poly}"))
     elif sift=="tolerated" and poly and "benign" in poly:
         tags.append(("BP4",f"SIFT {sift} & PolyPhen {poly}"))
-    sig=sig or ""
-    if "athogenic" in sig: tags.append((("PS_ClinVar" if stars>=2 else "PP5_ClinVar"),f"ClinVar {sig} ({stars} stars)"))
-    elif "enign" in sig: tags.append((("BS_ClinVar" if stars>=2 else "BP6_ClinVar"),f"ClinVar {sig} ({stars} stars)"))
-    codes={t[0] for t in tags}
-    ps={"PVS1","PS_ClinVar"}&codes; psup={"PM2","PP3","PP5_ClinVar","PVS1_mod"}&codes
-    bs={"BA1","BS1","BS_ClinVar"}&codes; bsup={"BP4","BP6_ClinVar"}&codes
-    if bs and not ps: call="Benign / Likely benign"
-    elif ps and "PVS1" in codes and ({"PM2","PS_ClinVar"}&codes): call="Pathogenic"
-    elif ps: call="Likely pathogenic"
-    elif psup and not bs: call="Likely pathogenic" if len(psup)>=2 else "Uncertain significance (VUS)"
-    elif bsup: call="Likely benign"
-    else: call="Uncertain significance (VUS)"
-    if "drug response" in sig.lower(): call+=" | Pharmacogenomic (drug response)"
-    return call, tags
+    sig=sig or ""; sig_l=sig.lower()
+    if "conflict" in sig_l:
+        tags.append(("ClinVar_conflicting",f"ClinVar {sig} ({stars} stars)"))
+    elif "pathogenic" in sig_l:
+        tags.append((("PS_ClinVar" if stars>=2 else "PP5_ClinVar"),f"ClinVar {sig} ({stars} stars)"))
+    elif "benign" in sig_l:
+        tags.append((("BS_ClinVar" if stars>=2 else "BP6_ClinVar"),f"ClinVar {sig} ({stars} stars)"))
+    tags.extend(extra_tags or [])
+    return _call_from_tags(tags,sig),tags
 
 # ---------- phenotype (HPO) ----------
 def resolve_hpo(tokens):
@@ -190,22 +469,75 @@ def resolve_hpo(tokens):
         if pick: ids.append({"hpo_id":pick["obo_id"],"label":pick["label"]})
     return ids
 
-def expand_hpo(hpo_ids):
+def expand_hpo(hpo_ids, return_status=False):
     full=set(hpo_ids)
+    available=True
     for hid in list(hpo_ids):
         iri=f"http://purl.obolibrary.org/obo/{hid.replace(':','_')}"
         j=_get(f"{OLS}/ontologies/hp/ancestors", params={"id":iri,"size":200})
+        if not isinstance(j,dict):
+            available=False
         for t in (((j or {}).get("_embedded") or {}).get("terms")) or []:
             oid=t.get("obo_id")
             if oid and oid.startswith("HP:"): full.add(oid)
     full-={"HP:0000001","HP:0000118"}
-    return full
+    return (full,available) if return_status else full
+
+
+def expand_hpo_profile(tokens, return_status=False):
+    """Resolve direct terms and return their labeled HPO ancestor graph for human review."""
+    direct=resolve_hpo(tokens)
+    terms={}
+    available=True
+    for item in direct:
+        hpo_id=item["hpo_id"]
+        label=item.get("label") or hpo_id
+        if label==hpo_id:
+            j=_get(f"{OLS}/search",params={"q":hpo_id,"ontology":"hp","rows":10})
+            if j is None:
+                available=False
+            docs=(((j or {}).get("response") or {}).get("docs")) or []
+            exact=next((d for d in docs if d.get("obo_id")==hpo_id),None)
+            if exact and exact.get("label"):
+                label=exact["label"]
+        terms[hpo_id]={
+            "hpo_id":hpo_id,"label":label,"kind":"direct","source_hpo_ids":[hpo_id]
+        }
+        iri=f"http://purl.obolibrary.org/obo/{hpo_id.replace(':','_')}"
+        j=_get(f"{OLS}/ontologies/hp/ancestors",params={"id":iri,"size":200})
+        if j is None:
+            available=False
+        for ancestor in (((j or {}).get("_embedded") or {}).get("terms")) or []:
+            ancestor_id=ancestor.get("obo_id")
+            if not ancestor_id or ancestor_id in {"HP:0000001","HP:0000118"}:
+                continue
+            existing=terms.get(ancestor_id)
+            if existing:
+                if hpo_id not in existing["source_hpo_ids"]:
+                    existing["source_hpo_ids"].append(hpo_id)
+                continue
+            terms[ancestor_id]={
+                "hpo_id":ancestor_id,
+                "label":ancestor.get("label") or ancestor_id,
+                "kind":"ancestor",
+                "source_hpo_ids":[hpo_id],
+            }
+    result=sorted(
+        terms.values(),
+        key=lambda term:(term["kind"]!="direct",str(term["label"]).casefold(),term["hpo_id"]),
+    )
+    return (result,available) if return_status else result
 
 OT_Q="""query($id:String!){ target(ensemblId:$id){ associatedDiseases(page:{size:6,index:0}){
   rows{ score disease{ id name phenotypes(page:{size:80,index:0}){ rows{ phenotypeHPO{ id name } } } } } } } }"""
-def gene_pheno_score(ensg, patient_ids, patient_full):
-    if not ensg: return 0.0,0,0,"",""
+def gene_pheno_score(ensg, patient_ids, patient_full, return_status=False):
+    empty=(0.0,0,0,"","")
+    if not ensg:
+        return (*empty,True) if return_status else empty
     j=_gql(OT, OT_Q, {"id":ensg})
+    available=isinstance(j,dict) and not (j.get("errors") and not (j.get("data") or {}).get("target"))
+    if not available:
+        return (*empty,False) if return_status else empty
     t=(((j or {}).get("data") or {}).get("target")) or {}
     hpo={}; best=None
     for row in ((t.get("associatedDiseases") or {}).get("rows") or []):
@@ -219,7 +551,9 @@ def gene_pheno_score(ensg, patient_ids, patient_full):
         hpo.update(dh)
     direct=set(hpo)&patient_ids; matched=set(hpo)&patient_full
     score=(len(direct)*1.0+(len(matched)-len(direct))*0.4)/max(len(patient_ids),1)
-    return round(min(score,1.0),3), len(direct), len(matched), (best[0] if best else ""), ("; ".join(best[2]) if best else "")
+    result=(round(min(score,1.0),3),len(direct),len(matched),
+            (best[0] if best else ""),("; ".join(best[2]) if best else ""))
+    return (*result,True) if return_status else result
 
 
 # ---------- AI module A: ESM-2 missense pathogenicity (optional) ----------
@@ -262,24 +596,77 @@ def esm_call(llr, del_thr=-3.0, tol_thr=-0.5):
 # GRCh37 variant is lifted over to GRCh38 first.
 ENSEMBL_GRCH37 = "https://grch37.rest.ensembl.org"
 
+
+def _reverse_complement(allele):
+    try:
+        return allele.upper().translate(str.maketrans("ACGTN","TGCAN"))[::-1]
+    except AttributeError:
+        return None
+
+
+def _liftover_allele_37_to_38(chrom, pos, ref, alt):
+    """Map a complete GRCh37 allele to GRCh38, including strand and chromosome changes."""
+    c=str(chrom).removeprefix("chr")
+    end=int(pos)+len(ref)-1
+    j=_get(f"{ENSEMBL_GRCH37}/map/human/GRCh37/{c}:{pos}..{end}/GRCh38")
+    mappings=(j or {}).get("mappings") or []
+    if len(mappings)!=1:
+        return None
+    mapped=mappings[0].get("mapped") or {}
+    try:
+        start=int(mapped["start"])
+        mapped_end=int(mapped["end"])
+        strand=int(mapped.get("strand",1))
+    except (KeyError,TypeError,ValueError):
+        return None
+    if abs(mapped_end-start)+1!=len(ref):
+        return None
+    mapped_ref=ref.upper()
+    mapped_alt=alt.upper()
+    if strand==-1:
+        mapped_ref=_reverse_complement(mapped_ref)
+        mapped_alt=_reverse_complement(mapped_alt)
+    if not mapped_ref or not mapped_alt:
+        return None
+    return {
+        "chrom":str(mapped.get("seq_region_name") or c).removeprefix("chr"),
+        "pos":min(start,mapped_end),
+        "ref":mapped_ref,
+        "alt":mapped_alt,
+        "strand":strand,
+    }
+
+
 def liftover_37_to_38(chrom, pos):
     """Map a GRCh37 position to GRCh38 via the Ensembl assembly-mapping REST endpoint."""
-    c = str(chrom).replace("chr", "")
-    j = _get(f"{ENSEMBL_GRCH37}/map/human/GRCh37/{c}:{pos}..{pos}/GRCh38")
-    if not j:
-        return None
-    mp = j.get("mappings") or []
-    return mp[0]["mapped"]["start"] if mp else None
+    mapped=_liftover_allele_37_to_38(chrom,pos,"N","N")
+    return mapped["pos"] if mapped else None
+
+
+def _vep_snv_matches(j, ref, alt):
+    if not j or len(ref)!=1 or len(alt)!=1:
+        return False
+    alleles=str(j[0].get("allele_string") or "").upper().split("/")
+    return len(alleles)>=2 and alleles[0]==ref.upper() and alt.upper() in alleles[1:]
 
 def alphamissense_score(chrom, pos, ref, alt, assembly="GRCh38", gene=None):
     """Return {'am_pathogenicity': float, 'am_class': str} for a missense variant, or None.
     Queries Ensembl VEP GRCh38 with AlphaMissense=1. If the input is GRCh37, lifts over first."""
-    c = str(chrom).replace("chr", "")
-    pos38 = pos if assembly == "GRCh38" else liftover_37_to_38(c, pos)
-    if not pos38:
+    if len(ref)!=1 or len(alt)!=1:
         return None
-    j = _get(f"{ENSEMBL}/vep/human/region/{c}:{pos38}-{pos38}/{alt}", params={"AlphaMissense": 1})
-    if not j:
+    mapped={"chrom":str(chrom).removeprefix("chr"),"pos":int(pos),"ref":ref.upper(),"alt":alt.upper()}
+    if assembly=="GRCh37":
+        mapped=_liftover_allele_37_to_38(chrom,pos,ref,alt)
+    if not mapped:
+        return None
+    j=_get(
+        f"{ENSEMBL}/vep/human/region/{mapped['chrom']}:{mapped['pos']}-{mapped['pos']}/{mapped['alt']}",
+        params={"AlphaMissense":1},
+    )
+    if not _vep_snv_matches(j,mapped["ref"],mapped["alt"]):
+        hgvs=f"{mapped['chrom']}:g.{mapped['pos']}{mapped['ref']}>{mapped['alt']}"
+        j=_get(f"{ENSEMBL}/vep/human/hgvs/{hgvs}",params={"AlphaMissense":1})
+    if not _vep_snv_matches(j,mapped["ref"],mapped["alt"]):
         return None
     tcs = j[0].get("transcript_consequences") or []
     # prefer the transcript for the annotated gene, else any transcript carrying an AM score
@@ -289,7 +676,14 @@ def alphamissense_score(chrom, pos, ref, alt, assembly="GRCh38", gene=None):
     same = [t for t in withscore if gene and t.get("gene_symbol") == gene]
     t = (same or withscore)[0]
     am = t["alphamissense"]
-    return {"am_pathogenicity": am.get("am_pathogenicity"), "am_class": am.get("am_class")}
+    try:
+        score=float(am.get("am_pathogenicity"))
+    except (TypeError,ValueError):
+        return None
+    am_class=am.get("am_class")
+    if not 0<=score<=1 or am_class not in {"likely_pathogenic","likely_benign","ambiguous"}:
+        return None
+    return {"am_pathogenicity":score,"am_class":am_class}
 
 def am_call(am):
     """Normalize AlphaMissense class to the pipeline's deleterious/tolerated/ambiguous vocabulary."""
@@ -299,14 +693,26 @@ def am_call(am):
     return {"likely_pathogenic": "deleterious", "likely_benign": "tolerated",
             "ambiguous": "ambiguous"}.get(cls, "ambiguous")
 
-def protein_context(rsid, chrom, pos, ref, alt, gene=None):
+def protein_context(rsid, chrom, pos, ref, alt, gene=None, assembly="GRCh38"):
     """Get protein sequence + AA position for a missense variant via Ensembl VEP + sequence.
     Always queries by REGION+ALLELE (not rsID): an rsID can carry several alt alleles, and the
     VEP-by-id route may return the amino-acid change for a DIFFERENT allele than the one in the
     VCF. Region+allele guarantees the scored mutant residue matches the patient's actual alt."""
-    url = f"{ENSEMBL}/vep/human/region/{chrom}:{pos}-{pos+len(ref)-1}/{alt}"
+    mapped={"chrom":str(chrom).removeprefix("chr"),"pos":int(pos),"ref":ref.upper(),"alt":alt.upper()}
+    if assembly=="GRCh37":
+        mapped=_liftover_allele_37_to_38(chrom,pos,ref,alt)
+    if not mapped:
+        return None
+    url = (
+        f"{ENSEMBL}/vep/human/region/{mapped['chrom']}:{mapped['pos']}-"
+        f"{mapped['pos']+len(mapped['ref'])-1}/{mapped['alt']}"
+    )
     j = _get(url, params={"content-type":"application/json"})
-    if not j: return None
+    if not j:
+        return None
+    if len(mapped["ref"])==len(mapped["alt"])==1 and not _vep_snv_matches(
+            j,mapped["ref"],mapped["alt"]):
+        return None
     tcs = j[0].get("transcript_consequences") or []
     cand = [t for t in tcs if t.get("amino_acids") and "/" in t.get("amino_acids","") and t.get("protein_start")]
     if not cand: return None
@@ -322,72 +728,321 @@ def protein_context(rsid, chrom, pos, ref, alt, gene=None):
     return {"seq":seq, "pos":t["protein_start"], "wt":wt, "mut":mut, "protein_change":f"{wt}{t['protein_start']}{mut}"}
 
 
-# ---------- AI module B: extract HPO terms from a free-text clinical note ----------
-def extract_hpo_from_note(note_text, api_key=None):
-    """Use an LLM to extract present phenotypes from a clinical note, then ground each
-    to an official HPO ID via OLS4. Requires ANTHROPIC_API_KEY (env or arg) and the
-    `anthropic` package (pip install anthropic). Returns [{hpo_id,label,note_evidence}]."""
+# ---------- LLM providers ----------
+LLM_MODEL = "claude-sonnet-4-5"
+_LLM_STATE = threading.local()
+
+
+def _reset_llm_state():
+    _LLM_STATE.providers=set()
+    _LLM_STATE.errors=[]
+
+
+def _record_llm_provider(provider):
+    if not hasattr(_LLM_STATE,"providers"):
+        _reset_llm_state()
+    _LLM_STATE.providers.add(provider)
+
+
+def _record_llm_error(provider,error):
+    if not hasattr(_LLM_STATE,"errors"):
+        _reset_llm_state()
+    _LLM_STATE.errors.append(f"{provider}: {error}")
+
+
+async def _copilot_invoke(system_p,user_p,model,timeout,isolated_home):
+    from copilot import CopilotClient
+    from copilot.generated.rpc import PermissionDecisionReject
+    from copilot.session_events import AssistantMessageData
+
+    def deny_tools(request,invocation):
+        return PermissionDecisionReject(feedback="Tools are disabled for this inference-only session.")
+
+    client=CopilotClient(
+        log_level="error",
+        base_directory=isolated_home,
+        working_directory=isolated_home,
+    )
+    session=None
+    try:
+        await asyncio.wait_for(client.start(),timeout=20)
+        session=await asyncio.wait_for(client.create_session(
+            model=model,
+            on_permission_request=deny_tools,
+            available_tools=[],
+            system_message={"mode":"replace","content":system_p+"\nDo not use tools. Return only the requested output."},
+            skip_custom_instructions=True,
+            enable_config_discovery=False,
+            enable_on_demand_instruction_discovery=False,
+            enable_file_hooks=False,
+            enable_host_git_operations=False,
+            enable_session_store=False,
+            enable_skills=False,
+            hooks={},
+            config_directory=isolated_home,
+            memory={"enabled":False},
+            infinite_sessions={"enabled":False},
+        ),timeout=20)
+        reply=await asyncio.wait_for(session.send_and_wait(user_p),timeout=timeout)
+        if not reply or not isinstance(reply.data,AssistantMessageData):
+            raise RuntimeError("Copilot returned no assistant message")
+        return reply.data.content
+    finally:
+        if session is not None:
+            try:
+               await asyncio.wait_for(client.delete_session(session.session_id),timeout=5)
+            except Exception:
+               pass
+        try:
+            await asyncio.wait_for(client.stop(),timeout=5)
+        except Exception:
+            try:
+               await asyncio.wait_for(client.force_stop(),timeout=5)
+            except Exception:
+               pass
+
+
+def _copilot_process_worker(result_queue,system_p,user_p,model,timeout,isolated_home):
+    try:
+        raw=asyncio.run(_copilot_invoke(system_p,user_p,model,timeout,isolated_home))
+        result_queue.put(("ok",raw))
+    except BaseException as exc:
+        result_queue.put(("error",f"{type(exc).__name__}: {exc}"))
+
+
+def _copilot_raw(system_p,user_p):
+    import multiprocessing,os,queue,shutil,tempfile
+    try:
+        import copilot
+    except ImportError as exc:
+        raise RuntimeError("install github-copilot-sdk to use the Copilot provider") from exc
+    model=os.environ.get("RAREDX_COPILOT_MODEL","gpt-5-mini")
+    timeout=max(10,int(os.environ.get("RAREDX_LLM_TIMEOUT_SECONDS","120")))
+    isolated_home=tempfile.mkdtemp(prefix="raredx-copilot-")
+    context=multiprocessing.get_context("spawn")
+    result_queue=context.Queue(maxsize=1)
+    process=context.Process(
+        target=_copilot_process_worker,
+        args=(result_queue,system_p,user_p,model,timeout,isolated_home),
+    )
+    try:
+        process.start()
+        end=time.monotonic()+timeout+55
+        while process.is_alive() and time.monotonic()<end:
+            process.join(0.5)
+            _check_cancelled()
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+            if process.is_alive():
+               process.kill()
+               process.join(5)
+            raise TimeoutError(f"Copilot inference exceeded {timeout} seconds")
+        try:
+            status,payload=result_queue.get(timeout=2)
+        except queue.Empty as exc:
+            raise RuntimeError(f"Copilot worker exited with code {process.exitcode} without a result") from exc
+        if status!="ok":
+            raise RuntimeError(payload)
+        return payload
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(5)
+        result_queue.close()
+        result_queue.join_thread()
+        shutil.rmtree(isolated_home,ignore_errors=True)
+
+
+def llm_diagnostics():
+    return {
+        "providers":sorted(getattr(_LLM_STATE,"providers",set())),
+        "errors":list(getattr(_LLM_STATE,"errors",[])),
+    }
+
+
+def _anthropic_raw(system_p,user_p,api_key=None,max_tokens=2500):
     import os
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    key=api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not key:
-        print("[raredx] --clinical-note needs ANTHROPIC_API_KEY (or use --hpo directly)", file=sys.stderr)
-        return []
+        raise RuntimeError("ANTHROPIC_API_KEY is not configured")
     try:
         import anthropic
-    except ImportError:
-        print("[raredx] pip install anthropic to use --clinical-note", file=sys.stderr)
+    except ImportError as exc:
+        raise RuntimeError("install anthropic to use the Anthropic provider") from exc
+    msg=anthropic.Anthropic(api_key=key).messages.create(
+        model=LLM_MODEL,max_tokens=max_tokens,system=system_p,
+        messages=[{"role":"user","content":user_p}])
+    return msg.content[0].text
+
+
+# ---------- AI module B: extract HPO terms from a free-text clinical note ----------
+def _ground_hpo_phrase(phrase):
+    j=_get(f"{OLS}/search",params={"q":phrase,"ontology":"hp","rows":5})
+    if j is None:
+        return None,False
+    docs=(((j or {}).get("response") or {}).get("docs")) or []
+    exact=next(
+        (d for d in docs if str(d.get("label") or "").casefold()==phrase.casefold()),
+        None,
+    )
+    pick=exact or (docs[0] if docs else None)
+    if not pick or not str(pick.get("obo_id") or "").startswith("HP:"):
+        return None,True
+    return {"obo_id":pick["obo_id"],"label":str(pick.get("label") or phrase)},True
+
+
+def _hpo_ancestor_options(candidate):
+    iri=f"http://purl.obolibrary.org/obo/{candidate['hpo_id'].replace(':','_')}"
+    j=_get(f"{OLS}/ontologies/hp/ancestors",params={"id":iri,"size":200})
+    options={candidate["hpo_id"]:{"hpo_id":candidate["hpo_id"],"label":candidate["label"]}}
+    if j is None:
+        return list(options.values()),False
+    for term in (((j or {}).get("_embedded") or {}).get("terms")) or []:
+        hpo_id=str(term.get("obo_id") or "")
+        label=str(term.get("label") or "")
+        if hpo_id.startswith("HP:") and hpo_id not in {"HP:0000001","HP:0000118"} and label:
+            options.setdefault(hpo_id,{"hpo_id":hpo_id,"label":label})
+    return list(options.values())[:100],True
+
+
+def _verify_hpo_candidates(note_text,candidates,api_key=None):
+    """Select the most specific supported term from each candidate's HPO ancestor chain."""
+    if not candidates:
         return []
-    client = anthropic.Anthropic(api_key=key)
-    sys_p = ("You extract phenotypic abnormalities from a clinical note and normalize each to a "
-             "concise English HPO-style phrase. Extract ONLY explicitly present abnormal phenotypes "
-             "(not negated/absent findings, not family history, not treatments). Return STRICT JSON.")
+    verification_items=[]; allowed_by_candidate={}; ancestor_failures=0
+    for candidate in candidates:
+        allowed,available=_hpo_ancestor_options(candidate)
+        if not available:
+            ancestor_failures+=1
+        allowed_by_candidate[candidate["hpo_id"]]={term["hpo_id"]:term for term in allowed}
+        verification_items.append({"candidate":candidate,"allowed_terms":allowed})
+    if ancestor_failures:
+        _record_llm_error("OLS HPO verification",f"{ancestor_failures} ancestor lookup(s) failed")
+    system_p=(
+        "You are an independent clinical-note entailment verifier for HPO coding. For every candidate, "
+        "compare its official label and allowed HPO ancestor terms with the complete note. Select the "
+        "MOST SPECIFIC allowed term whose phenotype and every qualifier are explicitly stated. Never "
+        "infer subtype, anatomy, "
+        "laterality, severity, frequency, duration, age of onset, chronicity, cause, inheritance, "
+        "treatment response, or associated findings. The selected_hpo_id MUST be one of allowed_terms; "
+        "use an empty string when none is supported. Evaluate all medical domains identically. Return "
+        "STRICT JSON."
+    )
+    user_p=(
+        f"Clinical note:\n{note_text}\n\nVerification items:\n"
+        f"{json.dumps(verification_items,ensure_ascii=False)}\n\n"
+        'Return JSON: {"decisions":[{"candidate_hpo_id":"HP:...",'
+        '"selected_hpo_id":"HP:... or empty","reason":"brief"}]}'
+    )
+    parsed=_llm_json(system_p,user_p,api_key,max_tokens=2500)
+    decisions=(parsed or {}).get("decisions") if isinstance(parsed,dict) else None
+    if not isinstance(decisions,list):
+        _record_llm_error("HPO verification","invalid verifier response")
+        return []
+    by_id={candidate["hpo_id"]:candidate for candidate in candidates}
+    verified=[]; seen=set()
+    for decision in decisions[:len(candidates)*2]:
+        if not isinstance(decision,dict):
+            continue
+        candidate_id=str(decision.get("candidate_hpo_id") or "")
+        candidate=by_id.get(candidate_id)
+        if not candidate:
+            continue
+        selected_id=str(decision.get("selected_hpo_id") or "")
+        selected_term=allowed_by_candidate[candidate_id].get(selected_id)
+        selected=(
+            {"hpo_id":selected_term["hpo_id"],"label":selected_term["label"],
+             "note_evidence":candidate["note_evidence"]}
+            if selected_term else None
+        )
+        if selected and selected["hpo_id"] not in seen:
+            seen.add(selected["hpo_id"])
+            verified.append(selected)
+    return verified
+
+
+def extract_hpo_from_note(note_text, api_key=None):
+    """Use an LLM to extract present phenotypes from a clinical note, then ground each
+    to an official HPO ID via OLS4. Uses GitHub Copilot by default, with Anthropic fallback."""
+    sys_p = (
+        "You extract phenotypic abnormalities from a clinical note and normalize each to a concise "
+        "English HPO-style phrase. Extract ONLY explicitly present abnormalities: not negated findings, "
+        "family history, treatments, or inferred subtypes. Every modifier in hpo_phrase must be stated "
+        "in the quoted evidence. Never add specificity about subtype, anatomy, laterality, severity, "
+        "frequency, duration, onset, chronicity, cause, inheritance, or treatment response. Return "
+        "STRICT JSON."
+    )
     user_p = (f"Clinical note:\n{note_text}\n\nReturn JSON: "
               '{"phenotypes":[{"note_evidence":"quote","hpo_phrase":"English phenotype term"}]}')
-    msg = client.messages.create(model="claude-sonnet-4-5", max_tokens=1500,
-                                 system=sys_p, messages=[{"role":"user","content":user_p}])
-    txt = re.sub(r"^```[a-z]*|```$", "", msg.content[0].text.strip(), flags=re.M).strip()
-    try:
-        phenos = json.loads(txt).get("phenotypes", [])
-    except json.JSONDecodeError:
+    parsed=_llm_json(sys_p,user_p,api_key,max_tokens=1500)
+    if not isinstance(parsed,dict):
         return []
-    # ground each phrase to an HPO ID via OLS4
-    seen=set(); out=[]
-    for p in phenos:
-        phrase = p.get("hpo_phrase","")
-        for q in [phrase] + ([] if phrase else []):
-            j = _get(f"{OLS}/search", params={"q":q,"ontology":"hp","rows":3})
-            docs = (((j or {}).get("response") or {}).get("docs")) or []
-            pick = next((d for d in docs if d.get("label","").lower()==q.lower()), docs[0] if docs else None)
-            if pick and pick["obo_id"] not in seen:
-                seen.add(pick["obo_id"])
-                out.append({"hpo_id":pick["obo_id"],"label":pick["label"],"note_evidence":p.get("note_evidence","")})
-                break
-    return out
-
-# ---------- agentic reasoning layer (inspired by DeepRare, Nature 2025) ----------
-LLM_MODEL = "claude-sonnet-4-5"
+    phenos=parsed.get("phenotypes",[])
+    if not isinstance(phenos,list):
+        return []
+    # Ground candidates first, then verify every official label against the complete note.
+    seen=set(); candidates=[]; grounding_failures=0
+    note_fold=note_text.casefold()
+    for p in phenos[:50]:
+        if not isinstance(p,dict):
+            continue
+        phrase=str(p.get("hpo_phrase") or "").strip()[:200]
+        if not phrase:
+            continue
+        pick,available=_ground_hpo_phrase(phrase)
+        if not available:
+            grounding_failures+=1
+        if not pick:
+            continue
+        evidence=str(p.get("note_evidence") or "").strip()[:500]
+        if evidence and evidence.casefold() not in note_fold:
+            evidence=""
+        if pick["obo_id"] not in seen:
+            seen.add(pick["obo_id"])
+            candidates.append({"hpo_id":pick["obo_id"],"label":pick["label"],
+                               "note_evidence":evidence})
+    if grounding_failures:
+        _record_llm_error("OLS HPO grounding",f"{grounding_failures} lookup(s) failed")
+    return _verify_hpo_candidates(note_text,candidates,api_key)
 
 def _llm_raw(system_p, user_p, api_key=None, max_tokens=2500):
-    """Return raw LLM text via the anthropic SDK (ANTHROPIC_API_KEY) or, if unavailable,
-    a `host.llm` accessor when running inside a Claude Science kernel. None if neither."""
+    """Return LLM text through Copilot, Anthropic, or a host accessor."""
     import os
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if key:
+    configured=os.environ.get("RAREDX_LLM_PROVIDER")
+    provider=(configured or ("anthropic" if api_key else "auto")).lower()
+    if provider not in {"auto","copilot","anthropic","host"}:
+        raise ValueError("RAREDX_LLM_PROVIDER must be auto, copilot, anthropic, or host")
+    if provider in {"auto","copilot"}:
         try:
-            import anthropic
-            msg = anthropic.Anthropic(api_key=key).messages.create(
-                model=LLM_MODEL, max_tokens=max_tokens, system=system_p,
-                messages=[{"role":"user","content":user_p}])
-            return msg.content[0].text
+            raw=_copilot_raw(system_p,user_p)
+            _record_llm_provider("GitHub Copilot")
+            return raw
         except Exception as e:
-            print(f"[raredx] anthropic error: {e}", file=sys.stderr)
-    _host = globals().get("host")  # injected in Claude Science kernels
-    if _host is not None and hasattr(_host, "llm"):
+            _record_llm_error("GitHub Copilot",e)
+            print(f"[raredx] GitHub Copilot error: {e}",file=sys.stderr)
+            if provider=="copilot":
+                return None
+    if provider in {"auto","anthropic"}:
         try:
-            return _host.llm(user_p, system=system_p, max_tokens=max_tokens)["text"]
+            raw=_anthropic_raw(system_p,user_p,api_key,max_tokens)
+            _record_llm_provider("Anthropic")
+            return raw
         except Exception as e:
-            print(f"[raredx] host.llm error: {e}", file=sys.stderr)
-    print("[raredx] agentic layer needs ANTHROPIC_API_KEY (or a host.llm accessor)", file=sys.stderr)
+            _record_llm_error("Anthropic",e)
+            print(f"[raredx] Anthropic error: {e}",file=sys.stderr)
+            if provider=="anthropic":
+                return None
+    _host=globals().get("host")
+    if provider in {"auto","host"} and _host is not None and hasattr(_host,"llm"):
+        try:
+            raw=_host.llm(user_p,system=system_p,max_tokens=max_tokens)["text"]
+            _record_llm_provider("host.llm")
+            return raw
+        except Exception as e:
+            _record_llm_error("host.llm",e)
+            print(f"[raredx] host.llm error: {e}",file=sys.stderr)
+    print("[raredx] no configured LLM provider is available",file=sys.stderr)
     return None
 
 def _extract_json(raw):
@@ -458,15 +1113,17 @@ def _gt_alleles(sample):
     gt = (sample or {}).get("GT")
     if not gt or gt in (".", "./.", ".|."): return None
     parts = gt.replace("|", "/").split("/")
+    if any(p=="." for p in parts):
+        return None
     try:
-        return {int(p) for p in parts if p != "."}
+        return {int(p) for p in parts}
     except ValueError:
         return None
 
 def _has_alt(sample):
-    """True if the genotype carries the alt allele (any index >= 1)."""
+    """Return alt presence, or None when the genotype is not fully callable."""
     al = _gt_alleles(sample)
-    return bool(al and any(a >= 1 for a in al))
+    return None if al is None else any(a >= 1 for a in al)
 
 def trio_inheritance(variants, father_vcf=None, mother_vcf=None, progress=None):
     """Classify the inheritance of each candidate variant against parental genotypes.
@@ -499,12 +1156,15 @@ def trio_inheritance(variants, father_vcf=None, mother_vcf=None, progress=None):
         ms = midx.get(key) if midx is not None else None
         f_alt = _has_alt(fs) if fs is not None else None
         m_alt = _has_alt(ms) if ms is not None else None
-        v["father_gt"] = (fs or {}).get("GT", "absent" if fidx is not None else "NA")
-        v["mother_gt"] = (ms or {}).get("GT", "absent" if midx is not None else "NA")
+        v["father_gt"] = ((fs or {}).get("GT") or ("not_present" if fidx is not None else "NA"))
+        v["mother_gt"] = ((ms or {}).get("GT") or ("not_present" if midx is not None else "NA"))
+        child_alt = _has_alt(v.get("sample"))
         child_hom = _zygosity(v) == "homozygous"
-        both_typed = fidx is not None and midx is not None
+        both_typed = f_alt is not None and m_alt is not None
         inh = ""
-        if both_typed:
+        if child_alt is not True:
+            inh = ""
+        elif both_typed:
             if not f_alt and not m_alt:
                 inh = "de_novo"
             elif f_alt and m_alt:
@@ -513,12 +1173,86 @@ def trio_inheritance(variants, father_vcf=None, mother_vcf=None, progress=None):
                 inh = "paternal"
             elif m_alt:
                 inh = "maternal"
-        else:  # only one parent available — partial call
-            present = (f_alt if fidx is not None else m_alt)
-            inh = ("paternal" if fidx is not None else "maternal") if present else "absent_in_parents"
+        elif f_alt is True:
+            inh = "paternal"
+        elif m_alt is True:
+            inh = "maternal"
+        elif fidx is not None or midx is not None:
+            inh = "absent_in_parents"
         v["inheritance"] = inh
         n += 1
     return n
+
+
+def _bounded_text(value,limit):
+    return str(value or "").strip()[:limit]
+
+
+def _sanitize_reflection(value):
+    if not isinstance(value,dict) or not isinstance(value.get("candidates"),list):
+        return None
+    candidates=[]
+    for item in value["candidates"][:100]:
+        if not isinstance(item,dict):
+            continue
+        try:
+            rank=int(item.get("rank"))
+        except (TypeError,ValueError):
+            continue
+        verdict=str(item.get("verdict") or "").lower()
+        if rank<1 or verdict not in {"support","uncertain","refute"}:
+            continue
+        candidates.append({
+            "rank":rank,
+            "gene":_bounded_text(item.get("gene"),100),
+            "verdict":verdict,
+            "reasoning":_bounded_text(item.get("reasoning"),2000),
+        })
+    if not candidates:
+        return None
+    return {"candidates":candidates,
+            "all_refuted":all(c["verdict"]=="refute" for c in candidates)}
+
+
+def _sanitize_differential(value,verified_urls):
+    if not isinstance(value,dict) or not isinstance(value.get("differential"),list):
+        return []
+    out=[]
+    for item in value["differential"][:20]:
+        if not isinstance(item,dict):
+            continue
+        likelihood=str(item.get("likelihood") or "low").lower()
+        if likelihood not in {"high","moderate","low"}:
+            likelihood="low"
+        raw_genes=item.get("genes")
+        raw_variants=item.get("supporting_variants")
+        raw_evidence=item.get("evidence")
+        genes=[_bounded_text(g,100) for g in (raw_genes if isinstance(raw_genes,list) else [])[:20]
+               if isinstance(g,(str,int,float)) and _bounded_text(g,100)]
+        variants=[_bounded_text(v,200) for v in (raw_variants if isinstance(raw_variants,list) else [])[:50]
+                  if isinstance(v,(str,int,float)) and _bounded_text(v,200)]
+        evidence=[]
+        for link in (raw_evidence if isinstance(raw_evidence,list) else [])[:30]:
+            if not isinstance(link,dict):
+                continue
+            url=str(link.get("url") or "")
+            if url in verified_urls:
+                evidence.append({"label":_bounded_text(link.get("label"),200),"url":url})
+        disease=_bounded_text(item.get("disease"),300)
+        if not disease:
+            continue
+        out.append({
+            "disease":disease,
+            "genes":genes,
+            "inheritance":_bounded_text(item.get("inheritance"),200),
+            "supporting_variants":variants,
+            "likelihood":likelihood,
+            "rationale":_bounded_text(item.get("rationale"),4000),
+            "evidence":evidence,
+            "next_steps":_bounded_text(item.get("next_steps"),2000),
+        })
+    return out
+
 
 def agentic_diagnosis(variants, patient_hpo, api_key=None, sample="", progress=None,
                       start_k=8, relax_step=8, max_rounds=3):
@@ -546,11 +1280,13 @@ def agentic_diagnosis(variants, patient_hpo, api_key=None, sample="", progress=N
             "acmg": v.get("acmg_tags"), "classification": (v.get("call") or "").split(" |")[0],
             "alphamissense": v.get("am_pathogenicity"), "esm2_llr": v.get("esm2_llr"),
             "zygosity": _zygosity(v), "chrom": v.get("chrom"),
+            "inheritance": v.get("inheritance"), "father_gt": v.get("father_gt"),
+            "mother_gt": v.get("mother_gt"),
             "phenotype_match_disease": v.get("pheno_disease"), "phenotype_shared_terms": v.get("pheno_shared"),
             "combined_score": v.get("combined"),
         }
 
-    k = min(start_k, len(variants)); rounds = 0; reflection = None; supported = []
+    k = max(1,min(start_k,len(variants))); rounds = 0; reflection = None; supported = []
     reflect_sys = (
         "You are a clinical geneticist reviewing an automatically-prioritized variant list for a "
         "rare-disease case. For EACH candidate, judge whether it plausibly explains the patient's "
@@ -568,8 +1304,9 @@ def agentic_diagnosis(variants, patient_hpo, api_key=None, sample="", progress=N
                 f"Candidates (already ranked):\n{json.dumps(cands, ensure_ascii=False, indent=1)}\n\n"
                 'Return JSON: {"candidates":[{"rank":int,"gene":str,"verdict":"support|uncertain|refute",'
                 '"reasoning":str}],"all_refuted":bool}')
-        reflection = _llm_json(reflect_sys, user, api_key)
-        if not reflection: return None
+        reflection = _sanitize_reflection(_llm_json(reflect_sys,user,api_key))
+        if not reflection:
+            return None
         verdicts = reflection.get("candidates", [])
         supported = [c for c in verdicts if c.get("verdict") in ("support","uncertain")]
         if supported or k >= len(variants):
@@ -614,12 +1351,8 @@ def agentic_diagnosis(variants, patient_hpo, api_key=None, sample="", progress=N
              'Return JSON: {"differential":[{"disease":str,"genes":[str],"inheritance":str,'
              '"supporting_variants":[str],"likelihood":"high|moderate|low","rationale":str,'
              '"evidence":[{"label":str,"url":str}],"next_steps":str}]}')
-    diff = _llm_json(diff_sys, duser, api_key)
-    differential = (diff or {}).get("differential", []) if diff else []
-    # final guard: strip any URL the LLM emitted that isn't in the verified set
     verified_set = {u for u,ok in valid.items() if ok}
-    for d in differential:
-        d["evidence"] = [e for e in d.get("evidence", []) if e.get("url") in verified_set]
+    differential=_sanitize_differential(_llm_json(diff_sys,duser,api_key),verified_set)
 
     return {"differential": differential,
             "reflection": reflection.get("candidates", []),
@@ -629,13 +1362,13 @@ def agentic_diagnosis(variants, patient_hpo, api_key=None, sample="", progress=N
 # ---------- report ----------
 def _differential_html(agentic):
     """Render the DeepRare-style differential + self-reflection block, or '' if absent."""
-    if not agentic or not agentic.get("differential"):
+    if not agentic:
         return ""
     LK={"high":"#c0392b","moderate":"#e67e22","low":"#7f8c8d"}
     cards=[]
     for i,d in enumerate(agentic["differential"],1):
         lk=(d.get("likelihood") or "low").lower()
-        links="".join(f'<a href="{html.escape(e["url"])}" target="_blank" style="font-size:11px;margin-right:10px;color:#2980b9">{html.escape(e["label"])} ↗</a>'
+        links="".join(f'<a href="{html.escape(e["url"])}" target="_blank" rel="noopener noreferrer" style="font-size:11px;margin-right:10px;color:#2980b9">{html.escape(e["label"])} ↗</a>'
                       for e in d.get("evidence",[]))
         genes=", ".join(d.get("genes",[])); svar="; ".join(d.get("supporting_variants",[]))
         cards.append(
@@ -658,15 +1391,25 @@ def _differential_html(agentic):
     meta=(f'<div style="font-size:11px;color:#95a5a6;margin-top:4px">Capa agéntica: {agentic.get("rounds",1)} ronda(s) de '
           f'autorreflexión · {agentic.get("k_considered","?")} candidatos evaluados · '
           f'{agentic.get("n_verified_links",0)} enlaces de evidencia verificados</div>')
-    return (f'<div style="margin:16px 0"><h2 style="font-size:16px;color:#1e2a38;margin:0 0 4px">'
-            f'🧬 Diagnóstico diferencial (razonamiento agéntico)</h2>{meta}{"".join(cards)}{ref_html}</div>')
+    heading=(
+        '<h2 style="font-size:16px;color:#1e2a38;margin:0 0 4px">'
+        '🧬 Diagnóstico diferencial (razonamiento agéntico)</h2>'
+        if cards else
+        '<h2 style="font-size:16px;color:#1e2a38;margin:0 0 4px">'
+        '🧬 Autorreflexión agéntica</h2>'
+    )
+    return f'<div style="margin:16px 0">{heading}{meta}{"".join(cards)}{ref_html}</div>'
 
-def write_html(variants, patient_hpo, prefix, assembly="GRCh38", agentic=None):
+def write_html(variants, patient_hpo, prefix, assembly="GRCh38", agentic=None, warnings=None):
     TC={"Pathogenic":"#c0392b","Likely pathogenic":"#e67e22","Uncertain significance (VUS)":"#7f8c8d",
         "Likely benign":"#27ae60","Benign":"#2ecc71"}
     tier=lambda c:"Benign" if c.split(" |")[0].startswith("Benign") else c.split(" |")[0]
     col=lambda c:TC.get(tier(c),"#7f8c8d")
-    faf=lambda a:"absent" if a is None else (f"{a:.2e}" if a<1e-3 else f"{a:.3f}")
+    def faf(v):
+        if v.get("af_status")=="unavailable":
+            return "no disponible"
+        a=v.get("af")
+        return "ausente" if a is None else (f"{a:.2e}" if a<1e-3 else f"{a:.3f}")
     def ai_cell(v):
         # AlphaMissense pathogenicity (0-1) and/or ESM-2 LLR, whichever were computed
         parts=[]
@@ -679,7 +1422,14 @@ def write_html(variants, patient_hpo, prefix, assembly="GRCh38", agentic=None):
             ec="#c0392b" if float(llr)<=-3 else ("#27ae60" if float(llr)>=-0.5 else "#7f8c8d")
             parts.append(f'<span style="color:{ec}" title="ESM-2 LLR">ESM {float(llr):.1f}</span>')
         return " ".join(parts) or "—"
-    chips="".join(f'<span class="hpo">{html.escape(t["label"])} <code>{t["hpo_id"]}</code></span>' for t in patient_hpo)
+    chips="".join(f'<span class="hpo">{html.escape(t["label"])} <code>{html.escape(t["hpo_id"])}</code></span>' for t in patient_hpo)
+    warning_html=""
+    if warnings:
+        warning_html=(
+            '<div class="note"><b>Advertencias de datos:</b><ul>'
+            + "".join(f"<li>{html.escape(str(w))}</li>" for w in warnings)
+            + "</ul></div>"
+        )
     has_trio=any(v.get("inheritance") for v in variants)
     INH_LABEL={"de_novo":"de novo","paternal":"paterna","maternal":"materna","biparental":"biparental",
                "homozygous_recessive":"hom. recesiva","absent_in_parents":"ausente en padres"}
@@ -690,13 +1440,13 @@ def write_html(variants, patient_hpo, prefix, assembly="GRCh38", agentic=None):
         wt=";font-weight:700" if inh=="de_novo" else ""
         return f'<td style="color:{color}{wt}">{INH_LABEL.get(inh,inh)}</td>'
     rows="".join(f'<tr><td>{v["rank"]}</td><td><b>{html.escape(v.get("gene") or "")}</b></td>'
-                 f'<td>{v["chrom"]}:{v["pos"]} {html.escape(v["ref"])}>{html.escape(v["alt"])}</td>'
-                 f'<td>{faf(v.get("af"))}</td><td>{html.escape(str(v.get("clinvar") or ""))} {"*"*int(v.get("stars") or 0)}</td>'
+                 f'<td>{html.escape(str(v["chrom"]))}:{v["pos"]} {html.escape(v["ref"])}>{html.escape(v["alt"])}</td>'
+                 f'<td>{faf(v)}</td><td>{html.escape(str(v.get("clinvar") or ""))} {"*"*int(v.get("stars") or 0)}</td>'
                  f'<td>{ai_cell(v)}</td>'
                  f'<td style="color:{col(v["call"])};font-weight:600">{html.escape(tier(v["call"]))}</td>'
                  + (inh_cell(v) if has_trio else "")
                  + f'<td>{v.get("variant_score",0):.2f}</td><td style="color:#8e44ad">{v.get("pheno_score",0):.2f}</td>'
-                 f'<td><b>{v.get("combined",0):.2f}</b></td><td>{v.get("filter")}</td></tr>' for v in variants)
+                 f'<td><b>{v.get("combined",0):.2f}</b></td><td>{html.escape(str(v.get("filter") or ""))}</td></tr>' for v in variants)
     inh_th="<th>Herencia</th>" if has_trio else ""
     now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     doc=f"""<!doctype html><html lang="es"><head><meta charset="utf-8"><title>raredx report</title>
@@ -710,33 +1460,79 @@ td{{padding:7px 8px;border-top:1px solid #eef1f5}} .note{{background:#fff8e1;bor
 <header><h1>raredx - Informe genomico priorizado por fenotipo</h1>
 <div style="color:#9fb3c8;font-size:12px">{assembly} | {len(variants)} variantes | {now}</div></header>
 <div class="hpobar"><b>Perfil HPO del paciente ({len(patient_hpo)}):</b><br>{chips or "(ninguno - solo ranking por variante)"}</div>
+{warning_html}
 {_differential_html(agentic)}
 <h2 style="font-size:14px;color:#1e2a38;margin:18px 0 4px">Variantes candidatas priorizadas</h2>
 <table><thead><tr><th>#</th><th>Gen</th><th>Variante</th><th>gnomAD</th><th>ClinVar</th><th>IA</th><th>Clase</th>{inh_th}<th>Var</th><th>Feno</th><th>Comb</th><th>QC</th></tr></thead>
 <tbody>{rows}</tbody></table>
 <div class="note"><b>Sistema de apoyo a la decision, no diagnostico.</b> VEP + gnomAD + ClinVar (score de variante ACMG-lite) x fenotipos HPO de Open Targets (score fenotipico). Confirmar por metodo ortogonal e interpretar en contexto clinico.</div>
 </body></html>"""
-    open(f"{prefix}_report.html","w").write(doc)
+    with open(f"{prefix}_report.html","w",encoding="utf-8") as fh:
+        fh.write(doc)
 
 # ---------- main ----------
 CSV_COLS=["rank","gene","rsid","chrom","pos","ref","alt","consequence","protein","af",
-          "clinvar","stars","pli","loeuf","sift","polyphen","call","variant_score",
+          "af_status","clinvar","stars","pli","loeuf","sift","polyphen","call","variant_score",
           "pheno_score","pheno_direct","pheno_disease","pheno_shared","combined","filter",
           "acmg_tags","esm2_llr","esm2_call","am_pathogenicity","am_call",
           "agentic_evaluated","reflect_verdict","inheritance","father_gt","mother_gt"]
 
-def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, assembly="GRCh38",
+
+def _variant_evidence_score(tags, call):
+    """Absolute 0-1 evidence score; unlike min-max scaling, it is stable across VCFs."""
+    codes={t[0] for t in tags}
+    if "BA1" in codes:
+        return 0.0
+    score=0.5
+    score+=0.30 if "PVS1" in codes else 0
+    score+=0.25 if "PS_ClinVar" in codes else 0
+    score+=0.25 if "PS2" in codes else 0
+    score+=0.15 if "PM2" in codes else 0
+    score+=0.12 if "PVS1_mod" in codes else 0
+    score+=(0.10 if "PP3_AM" in codes else 0.08 if {"PP3","PP3_ESM"}&codes else 0)
+    score+=0.06 if "PP5_ClinVar" in codes else 0
+    score-=0.30 if "BS_ClinVar" in codes else 0
+    score-=0.25 if "BS1" in codes else 0
+    score-=(0.10 if "BP4_AM" in codes else 0.08 if {"BP4","BP4_ESM"}&codes else 0)
+    score-=0.06 if "BP6_ClinVar" in codes else 0
+    if call.split(" |")[0].startswith("Benign"):
+        score=min(score,0.2)
+    if "ClinVar_conflicting" in codes:
+        score=0.5
+    elif call.split(" |")[0]=="Uncertain significance (VUS)" and (
+            {"BS1","BS_ClinVar"}&codes and {"PVS1","PS_ClinVar","PS2"}&codes):
+        score=0.5
+    return round(max(0.0,min(score,1.0)),3)
+
+
+def _rerank_agentic(variants, agentic_result):
+    original_to_variant={v["rank"]:v for v in variants}
+    verdict_order={"support":0,"uncertain":1,"refute":3}
+    variants.sort(key=lambda v:(verdict_order.get(v.get("reflect_verdict"),2),-v["combined"]))
+    old_to_new={}
+    for new_rank,v in enumerate(variants,1):
+        old_to_new[v["rank"]]=new_rank
+        v["rank"]=new_rank
+    for reflected in agentic_result.get("reflection",[]):
+        old_rank=reflected.get("rank")
+        if old_rank in original_to_variant:
+            reflected["original_rank"]=old_rank
+            reflected["rank"]=old_to_new[old_rank]
+
+
+def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, assembly="auto",
                  use_esm=False, use_am=False, agentic=False, reflect_k=8,
                  father_vcf=None, mother_vcf=None, email=None,
-                 anthropic_key=None, progress=None):
+                 anthropic_key=None, progress=None, max_variants=None,
+                 reviewed_hpo_expansion=None):
     """Annotate a VCF and prioritize variants. Reusable entry point for CLI and web server.
 
     Args:
         vcf_path: path to the input VCF.
-        sample: sample id (label only).
+        sample: sample ID to select in a multi-sample VCF; single-sample VCFs use their only sample.
         hpo: comma/newline-separated HPO IDs or free-text terms.
         clinical_note_text: raw clinical-note text (LLM -> HPO), or None.
-        assembly: 'GRCh38' or 'GRCh37' (GRCh37 lifts over to GRCh38 for AlphaMissense).
+        assembly: 'auto', 'GRCh38', or 'GRCh37' (auto reads VCF metadata).
         use_esm / use_am: enable the ESM-2 / AlphaMissense missense layers.
         email: contact email for NCBI E-utilities.
         anthropic_key: key for the clinical-note LLM layer (else ANTHROPIC_API_KEY env).
@@ -750,83 +1546,155 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
             try: progress(done, total, msg)
             except Exception: pass
 
-    variants=parse_vcf(vcf_path)
+    _reset_llm_state()
+    _check_cancelled()
+    if assembly in (None,"auto","AUTO"):
+        assembly=detect_vcf_assembly(vcf_path)
+    variants=parse_vcf(
+        vcf_path,sample=sample,allow_empty=False,max_variants=max_variants,called_only=True
+    )
     _prog(0, len(variants), f"VCF leído: {len(variants)} variantes")
+    warnings=[]
 
     # patient HPO profile — from clinical note (LLM) and/or explicit hpo string
     patient_hpo=[]
     if clinical_note_text:
         patient_hpo=extract_hpo_from_note(clinical_note_text, anthropic_key)
-        _prog(0, len(variants), f"{len(patient_hpo)} fenotipos extraídos de la nota clínica")
+        llm_errors=list(getattr(_LLM_STATE,"errors",[]))
+        if not patient_hpo:
+            warnings.append("Clinical note did not yield HPO terms; check LLM configuration or provide HPO IDs")
+        if llm_errors:
+            warnings.extend(f"Clinical-note extraction warning: {error}" for error in llm_errors)
+        providers=sorted(getattr(_LLM_STATE,"providers",set()))
+        provider_note=f" con {', '.join(providers)}" if providers else ""
+        _prog(0, len(variants), f"{len(patient_hpo)} fenotipos extraídos de la nota clínica{provider_note}")
     tokens=[t for t in re.split(r"[,\n]", hpo or "") if t.strip()]
     if tokens:
         existing={t["hpo_id"] for t in patient_hpo}
-        for t in resolve_hpo(tokens):
+        resolved=resolve_hpo(tokens)
+        for t in resolved:
             if t["hpo_id"] not in existing: patient_hpo.append(t); existing.add(t["hpo_id"])
+        if len(resolved)<len(tokens):
+            warnings.append(f"{len(tokens)-len(resolved)} HPO term(s) could not be resolved")
     patient_ids={t["hpo_id"] for t in patient_hpo}
-    patient_full=expand_hpo(patient_ids) if patient_ids else set()
+    if patient_ids and reviewed_hpo_expansion is not None:
+        reviewed_tokens=[
+            token.strip() for token in re.split(r"[,\n]",reviewed_hpo_expansion)
+            if token.strip()
+        ]
+        reviewed_terms=resolve_hpo(reviewed_tokens)
+        patient_full={term["hpo_id"] for term in reviewed_terms}|patient_ids
+        hpo_expansion_available=len(reviewed_terms)==len(reviewed_tokens)
+        if not hpo_expansion_available:
+            warnings.append("Some reviewed expanded HPO terms could not be resolved")
+    elif patient_ids:
+        patient_full,hpo_expansion_available=expand_hpo(patient_ids,return_status=True)
+        if not hpo_expansion_available:
+            warnings.append("HPO ancestor expansion was partially unavailable; phenotype matching may be incomplete")
+    else:
+        patient_full=set()
     if patient_hpo: _prog(0, len(variants), f"{len(patient_ids)} términos HPO (expandidos a {len(patient_full)})")
 
     cons_cache={}
+    pheno_cache={}
+    vep_failures=gnomad_failures=clinvar_failures=constraint_failures=0
+    am_attempts=am_failures=esm_attempts=esm_failures=pheno_failures=0
     for i,v in enumerate(variants,1):
+        _request_timeout()
         ve=vep(v, assembly); v.update(consequence=ve.get("most_severe"), gene=ve.get("gene"),
                             gene_id=ve.get("gene_id"), protein=ve.get("amino_acids"),
                             sift=ve.get("sift"), polyphen=ve.get("polyphen"))
-        v["af"]=gnomad_af(v) if assembly=="GRCh38" else ve.get("gnomad_af")
+        if not ve.get("annotation_available"):
+            vep_failures+=1
+        if assembly=="GRCh38":
+            v["af"],af_available=gnomad_af(v,return_status=True)
+        else:
+            v["af"],af_available=ve.get("gnomad_af"),bool(ve.get("annotation_available"))
+        v["af_status"]=("observed" if v["af"] is not None else "absent" if af_available else "unavailable")
+        if not af_available:
+            gnomad_failures+=1
         con=gnomad_constraint(v["gene"], cons_cache) if v.get("gene") else {"pli":None,"loeuf":None}
         v["pli"],v["loeuf"]=con.get("pli"),con.get("loeuf")
-        cv=clinvar(v, email); v.update(clinvar=cv.get("significance"), stars=cv.get("stars"),
-                                       conditions=cv.get("conditions"), protein=v.get("protein") or cv.get("protein_change"))
+        if v.get("gene") and not con.get("available"):
+            constraint_failures+=1
+        cv=clinvar(v,email,assembly); v.update(clinvar=cv.get("significance"), stars=cv.get("stars"),
+                                      conditions=cv.get("conditions"), protein=v.get("protein") or cv.get("protein_change"))
+        if not cv.get("available"):
+            clinvar_failures+=1
         v["esm2_llr"]=None; v["esm2_call"]=""
         if use_esm and v["consequence"]=="missense_variant":
-            ctx=protein_context(v.get("rsid"), v["chrom"], v["pos"], v["ref"], v["alt"], v.get("gene"))
+            esm_attempts+=1
+            ctx=protein_context(v.get("rsid"),v["chrom"],v["pos"],v["ref"],v["alt"],
+                                v.get("gene"),assembly=assembly)
             if ctx:
                 v["esm2_llr"]=esm_score_missense(ctx["seq"], ctx["pos"], ctx["wt"], ctx["mut"])
                 v["esm2_call"]=esm_call(v["esm2_llr"])
                 v["protein"]=v.get("protein") or ctx["protein_change"]
+            if v["esm2_llr"] is None:
+                esm_failures+=1
         v["am_pathogenicity"]=None; v["am_call"]=""
         if use_am and v["consequence"]=="missense_variant":
+            am_attempts+=1
             am=alphamissense_score(v["chrom"], v["pos"], v["ref"], v["alt"], assembly=assembly, gene=v.get("gene"))
             if am:
                 v["am_pathogenicity"]=am["am_pathogenicity"]; v["am_call"]=am_call(am)
-        call,tags=classify(v["af"],v["consequence"],v["pli"],v["loeuf"],v["clinvar"],v["stars"],v["sift"],v["polyphen"])
-        if v["esm2_call"]=="deleterious": tags.append(("PP3_ESM",f"ESM-2 LLR {v['esm2_llr']} (deleterious)"))
-        elif v["esm2_call"]=="tolerated": tags.append(("BP4_ESM",f"ESM-2 LLR {v['esm2_llr']} (tolerated)"))
-        if v["am_call"]=="deleterious": tags.append(("PP3_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_pathogenic)"))
-        elif v["am_call"]=="tolerated": tags.append(("BP4_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_benign)"))
-        v["call"]=call; v["acmg_tags"]=",".join(t[0] for t in tags); v["evidence"]="; ".join(f"{t[0]}: {t[1]}" for t in tags)
-        codes={t[0] for t in tags}; s=0
-        s+=50*len({"PVS1","PS_ClinVar"}&codes)+20*len({"PM2","PP3","PP5_ClinVar","PVS1_mod"}&codes)
-        s-=40*len({"BA1","BS_ClinVar"}&codes)+15*len({"BS1","BP4","BP6_ClinVar"}&codes)
-        if call.split(" |")[0]=="Pathogenic": s+=30
-        if v["filter"]!="PASS": s-=25
-        v["_raw"]=s
+            else:
+                am_failures+=1
+        extra_tags=[]
+        if v["esm2_call"]=="deleterious": extra_tags.append(("PP3_ESM",f"ESM-2 LLR {v['esm2_llr']} (deleterious)"))
+        elif v["esm2_call"]=="tolerated": extra_tags.append(("BP4_ESM",f"ESM-2 LLR {v['esm2_llr']} (tolerated)"))
+        if v["am_call"]=="deleterious": extra_tags.append(("PP3_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_pathogenic)"))
+        elif v["am_call"]=="tolerated": extra_tags.append(("BP4_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_benign)"))
+        call,tags=classify(v["af"],v["consequence"],v["pli"],v["loeuf"],v["clinvar"],v["stars"],
+                           v["sift"],v["polyphen"],af_available=af_available,extra_tags=extra_tags)
+        v["call"]=call
+        v["_tags"]=tags
         if patient_ids:
-            ps,pd_,pm_,pdis,psh=gene_pheno_score(v.get("gene_id"),patient_ids,patient_full)
+            gene_id=v.get("gene_id")
+            if gene_id not in pheno_cache:
+                pheno_cache[gene_id]=gene_pheno_score(
+                    gene_id,patient_ids,patient_full,return_status=True
+                )
+            ps,pd_,pm_,pdis,psh,pheno_available=pheno_cache[gene_id]
+            if gene_id and not pheno_available:
+                pheno_failures+=1
             v.update(pheno_score=ps,pheno_direct=pd_,pheno_matched=pm_,pheno_disease=pdis,pheno_shared=psh)
         else:
             v.update(pheno_score=0.0,pheno_direct=0,pheno_matched=0,pheno_disease="",pheno_shared="")
         if i % 10 == 0 or i == len(variants):
             _prog(i, len(variants), f"Anotando variantes: {i}/{len(variants)}")
 
+    if vep_failures==len(variants):
+        raise RuntimeError("Ensembl VEP unavailable for every variant; analysis aborted")
+    if vep_failures:
+        warnings.append(f"Ensembl VEP unavailable for {vep_failures} variant(s)")
+    if gnomad_failures:
+        warnings.append(f"gnomAD frequency unavailable for {gnomad_failures} variant(s); PM2 was not assigned")
+    if clinvar_failures:
+        warnings.append(f"ClinVar unavailable for {clinvar_failures} variant(s)")
+    if constraint_failures:
+        warnings.append(f"gnomAD constraint unavailable for {constraint_failures} variant(s)")
+    if am_attempts and am_failures:
+        warnings.append(f"AlphaMissense unavailable for {am_failures} of {am_attempts} missense variant(s)")
+    if esm_attempts and esm_failures:
+        warnings.append(f"ESM-2 unavailable for {esm_failures} of {esm_attempts} missense variant(s)")
+    if pheno_failures:
+        warnings.append(f"Open Targets phenotype data unavailable for {pheno_failures} variant(s)")
+
     # trio inheritance (optional) — assigns v["inheritance"]; de novo adds PS2 (supporting strong)
     if father_vcf or mother_vcf:
         n_trio=trio_inheritance(variants, father_vcf, mother_vcf, progress)
         for v in variants:
             if v.get("inheritance")=="de_novo":
-                v["_raw"]=v.get("_raw",0)+30  # PS2 bonus
-                v["acmg_tags"]=(v.get("acmg_tags","")+(",PS2" if v.get("acmg_tags") else "PS2"))
-                v["evidence"]=(v.get("evidence","")+"; PS2: de novo (absent in both genotyped parents)").lstrip("; ")
+                v["_tags"].append(("PS2","de novo (absent in both explicitly genotyped parents)"))
+                v["call"]=_call_from_tags(v["_tags"],v.get("clinvar"))
         _prog(len(variants), len(variants), f"Herencia analizada en {n_trio} variantes")
 
-    raws=[v["_raw"] for v in variants] or [0]; lo,hi=min(raws),max(raws)
     for v in variants:
-        vs=round((v["_raw"]-lo)/(hi-lo),3) if hi>lo else 0.5
-        if v.get("esm2_call")=="deleterious": vs=min(vs+0.08,1.0)
-        elif v.get("esm2_call")=="tolerated": vs=max(vs-0.08,0.0)
-        if v.get("am_call")=="deleterious": vs=min(vs+0.10,1.0)
-        elif v.get("am_call")=="tolerated": vs=max(vs-0.10,0.0)
-        v["variant_score"]=round(vs,3)
+        tags=v.pop("_tags")
+        v["acmg_tags"]=",".join(t[0] for t in tags)
+        v["evidence"]="; ".join(f"{t[0]}: {t[1]}" for t in tags)
+        v["variant_score"]=_variant_evidence_score(tags,v["call"])
         c=0.55*v["variant_score"]+0.45*v["pheno_score"] if patient_ids else v["variant_score"]
         if v["filter"]!="PASS": c*=0.5
         v["combined"]=round(c,3)
@@ -839,21 +1707,29 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
     if agentic:
         agentic_result=agentic_diagnosis(variants, patient_hpo, api_key=anthropic_key,
                                           sample=sample, progress=progress, start_k=reflect_k)
+        if agentic_result is None:
+            warnings.append("Agentic reasoning was requested but unavailable; numeric ranking was retained")
         # flag which rows the LLM self-reflection actually examined (only the top-K window)
         for v in variants:
             v["agentic_evaluated"]="yes" if v.get("reflect_verdict") else "no"
+        if agentic_result:
+            _rerank_agentic(variants,agentic_result)
 
     return {"variants":variants, "patient_hpo":patient_hpo, "csv_cols":CSV_COLS,
-            "n_input":len(variants), "assembly":assembly, "agentic":agentic_result}
+            "n_input":len(variants), "assembly":assembly, "agentic":agentic_result,
+            "warnings":warnings,
+            "llm_providers":sorted(getattr(_LLM_STATE,"providers",set()))}
 
 def write_outputs(result, out_prefix):
     """Write <prefix>_annotated.csv and <prefix>_report.html from a run_pipeline() result."""
     import csv
-    with open(f"{out_prefix}_annotated.csv","w",newline="") as fh:
+    from pathlib import Path
+    Path(out_prefix).parent.mkdir(parents=True,exist_ok=True)
+    with open(f"{out_prefix}_annotated.csv","w",newline="",encoding="utf-8") as fh:
         w=csv.DictWriter(fh, fieldnames=result["csv_cols"], extrasaction="ignore"); w.writeheader()
         for v in result["variants"]: w.writerow(v)
     write_html(result["variants"], result["patient_hpo"], out_prefix, result.get("assembly","GRCh38"),
-               result.get("agentic"))
+               result.get("agentic"),result.get("warnings"))
 
 def main():
     ap=argparse.ArgumentParser(description="raredx VCF annotation & phenotype prioritization")
@@ -864,8 +1740,8 @@ def main():
     ap.add_argument("--email", default=None, help="Contact email for NCBI E-utilities (optional)")
     ap.add_argument("--esm", action="store_true", help="Score missense with ESM-2 (needs torch+fair-esm)")
     ap.add_argument("--alphamissense", action="store_true", help="Score missense with AlphaMissense (precomputed, via Ensembl VEP; no GPU)")
-    ap.add_argument("--assembly", default="GRCh38", choices=["GRCh38","GRCh37"], help="Genome build of the input VCF (AlphaMissense lifts GRCh37->GRCh38)")
-    ap.add_argument("--clinical-note", default=None, help="Path to free-text clinical note; extracts HPO via LLM (needs ANTHROPIC_API_KEY)")
+    ap.add_argument("--assembly", default="auto", choices=["auto","GRCh38","GRCh37"], help="Genome build (default: detect from VCF metadata)")
+    ap.add_argument("--clinical-note", default=None, help="Path to free-text clinical note; extracts HPO via configured LLM")
     ap.add_argument("--agentic", action="store_true", help="Agentic layer: LLM self-reflection over candidates + traceable differential diagnosis with link verification (needs ANTHROPIC_API_KEY)")
     ap.add_argument("--reflect-k", type=int, default=8, help="Agentic layer: number of top candidates the LLM self-reflection examines (default 8; window widens only if all are refuted)")
     ap.add_argument("--father", default=None, help="Father VCF for trio analysis (de novo detection → ACMG PS2)")

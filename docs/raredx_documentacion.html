@@ -74,10 +74,11 @@ resuelven contra APIs REST públicas en vivo; no se mantienen bases de datos loc
 
 <h2 id="entradas">Entradas y detección de ensamblaje</h2>
 <p>La entrada primaria es un archivo VCF. El parser extrae, por registro: cromosoma (se elimina el
-prefijo <code>chr</code>; <code>chrM</code>→<code>MT</code>), posición, ref, primer alelo alt, rsID,
+prefijo <code>chr</code>), posición, ref, todos los alelos alt, rsID,
 QUAL, FILTER y el campo de genotipo de la muestra (<code>GT</code> y demás claves FORMAT, que se
-conservan para el razonamiento de cigosidad). El ensamblaje se indica con <code>--assembly {GRCh38|GRCh37}</code>
-(por defecto GRCh38). El soporte de GRCh37/hg19 es de primera clase: la anotación usa el endpoint
+conservan para el razonamiento de cigosidad). Por defecto, el ensamblaje se detecta automáticamente
+desde <code>##reference</code> o las longitudes estándar de los contigs; se puede forzar con
+<code>--assembly {GRCh38|GRCh37}</code>. El soporte de GRCh37/hg19 es de primera clase: la anotación usa el endpoint
 VEP de GRCh37 y, donde una fuente solo existe en GRCh38 (AlphaMissense), la coordenada se
 <b>convierte a GRCh38 por variante</b> mediante el servicio de mapeo de ensamblajes de Ensembl.</p>
 
@@ -118,11 +119,14 @@ en un veredicto de 5 niveles. Los umbrales implementados son:</p>
 <tr><td><code>PS_ClinVar</code> / <code>PP5_ClinVar</code></td><td>ClinVar "pathogenic": ≥2★ → PS; &lt;2★ → PP5</td><td>patogénico</td></tr>
 <tr><td><code>BS_ClinVar</code> / <code>BP6_ClinVar</code></td><td>ClinVar "benign": ≥2★ → BS; &lt;2★ → BP6</td><td>benigno</td></tr>
 </tbody></table>
-<p>La combinación de etiquetas produce el veredicto: presencia de evidencia benigna fuerte sin
-patogénica → <b>Benigna/Prob. benigna</b>; <code>PVS1</code> + (<code>PM2</code> o <code>PS_ClinVar</code>)
-→ <b>Patogénica</b>; evidencia patogénica fuerte → <b>Prob. patogénica</b>; ≥2 evidencias de soporte
-patogénico sin benignas → <b>Prob. patogénica</b>, una sola → <b>VUS</b>; solo soporte benigno →
-<b>Prob. benigna</b>; en otro caso <b>VUS</b>. Las variantes marcadas "drug response" en ClinVar se
+<p>Las etiquetas se combinan de forma conservadora mediante puntos de evidencia:
+<code>PVS1</code> +8; <code>PS_ClinVar</code>/<code>PS2</code> +4;
+<code>PM2</code>/<code>PVS1_mod</code> +2; <code>PP5_ClinVar</code> y la familia de predictores PP3
++1; <code>BS1</code>/<code>BS_ClinVar</code> −4; y <code>BP6_ClinVar</code> o la familia BP4 −1.
+Los predictores computacionales correlacionados cuentan una sola vez. Una suma ≥10 produce
+<b>Patogénica</b>, 6–9 <b>Prob. patogénica</b>, −6 a −2 <b>Prob. benigna</b>, ≤−7
+<b>Benigna</b> y el resto <b>VUS</b>. <code>BA1</code> actúa como regla benigna independiente y la
+evidencia conflictiva de ClinVar fuerza VUS. Las variantes marcadas "drug response" en ClinVar se
 etiquetan además como farmacogenómicas.</p>
 
 <h2 id="ia-missense">3 · Predictores de IA para variantes missense</h2>
@@ -171,12 +175,19 @@ antecedentes familiares y tratamientos) y devuelve, por cada uno, la frase textu
 Cada frase se aterriza a un término HPO oficial buscando en <b>OLS4</b> (ontología <code>hp</code>),
 prefiriendo coincidencia exacta de etiqueta. Funciona en varios idiomas y sobre descripciones
 coloquiales, no solo terminología formal. La trazabilidad frase→HPO se conserva en el resultado.</p>
+<p>El proveedor predeterminado es <b>GitHub Copilot</b> mediante su SDK oficial, ejecutado sin
+herramientas, memoria ni instrucciones del repositorio. Anthropic puede configurarse como fallback.
+La nota clínica se envía al proveedor seleccionado, por lo que su uso debe cumplir la política de
+datos clínicos de la organización.</p>
+<p>En la interfaz web la extracción es un paso separado: el clínico pulsa <b>Extraer HPO</b>, revisa
+la etiqueta, el identificador y la frase de evidencia, y puede desmarcar o editar términos antes de
+iniciar el análisis.</p>
 
 <h2 id="combinado">6 · Puntuación combinada y ranking</h2>
-<p>El <code>variant_score</code> (0–1) se obtiene normalizando la evidencia ACMG-lite y modulándola con
-las llamadas de IA missense: una llamada <i>deleterious</i> de ESM-2 suma +0.08 y una <i>tolerated</i>
-resta −0.08; AlphaMissense pesa algo más (±0.10) por ser un predictor clínicamente calibrado. Cuando
-hay fenotipo, la puntuación final integra ambos motores:</p>
+<p>El <code>variant_score</code> (0–1) es una puntuación absoluta obtenida sumando pesos ACMG-lite; no
+se normaliza contra las demás variantes del VCF. ESM-2 y AlphaMissense aportan evidencia
+<code>PP3</code>/<code>BP4</code> antes de calcular la clasificación y la puntuación final. Cuando hay
+fenotipo, la puntuación final integra ambos motores:</p>
 <div class="eq">combined = 0.55 · variant_score + 0.45 · pheno_score       (× 0.5 si la variante no pasa el FILTER del VCF)</div>
 <p>Las variantes se ordenan por <code>combined</code> de forma descendente. El efecto es que, entre dos
 variantes con evidencia molecular parecida, la que encaja con la clínica asciende — el principio de
@@ -216,7 +227,7 @@ herencia a partir de la presencia del alelo alt:</p>
 <table>
 <thead><tr><th>Modo</th><th>Condición</th><th>Efecto</th></tr></thead>
 <tbody>
-<tr><td><code>de_novo</code></td><td>alt en el hijo, ausente en <b>ambos</b> progenitores genotipados</td><td>añade el criterio ACMG <b>PS2</b> (soporte fuerte) y una bonificación al score</td></tr>
+<tr><td><code>de_novo</code></td><td>alt en el hijo y llamada explícita sin alt (p. ej. <code>0/0</code>) en <b>ambos</b> progenitores</td><td>añade el criterio ACMG <b>PS2</b> (soporte fuerte) y recalcula clasificación y score</td></tr>
 <tr><td><code>paternal</code> / <code>maternal</code></td><td>alt presente en un solo progenitor</td><td>heredada</td></tr>
 <tr><td><code>biparental</code></td><td>alt en ambos, hijo heterocigoto</td><td>heredada de ambos</td></tr>
 <tr><td><code>homozygous_recessive</code></td><td>hijo homocigoto, ambos progenitores portadores</td><td>compatible con herencia recesiva</td></tr>
@@ -224,6 +235,8 @@ herencia a partir de la presencia del alelo alt:</p>
 <p>El resultado se añade al CSV (<code>inheritance</code>, <code>father_gt</code>, <code>mother_gt</code>)
 y el informe muestra una columna "Herencia". La detección de <i>de novo</i> requiere que ambos
 progenitores estén genotipados en ese locus; con un solo progenitor la llamada es parcial.</p>
+<p>La ausencia del sitio en un VCF parental de solo variantes no demuestra un genotipo de referencia
+y nunca se usa por sí sola para asignar <i>de novo</i>.</p>
 
 <h2 id="salidas">8 · Salidas</h2>
 <ul>
