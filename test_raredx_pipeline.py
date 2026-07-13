@@ -954,3 +954,82 @@ def test_html_report_distinguishes_unavailable_frequency(tmp_path):
     report = Path(prefix + "_report.html").read_text(encoding="utf-8")
 
     assert "no disponible" in report
+
+
+def test_map_concurrent_preserves_order_and_propagates_errors():
+    assert rx._map_concurrent([1, 2, 3, 4], lambda x: x * x, 3) == [1, 4, 9, 16]
+    # serial fallback (single worker) still preserves order
+    assert rx._map_concurrent([1, 2, 3], lambda x: x + 1, 1) == [2, 3, 4]
+    assert rx._map_concurrent([], lambda x: x, 4) == []
+
+    def boom(x):
+        if x == 3:
+            raise rx.AnalysisCancelled("stop")
+        return x
+
+    with pytest.raises(rx.AnalysisCancelled):
+        rx._map_concurrent([1, 2, 3, 4, 5], boom, 4)
+
+
+def test_prefilter_skips_deep_layers_for_common_variants_and_ranks_candidates(tmp_path, monkeypatch):
+    path = write_vcf(
+        tmp_path / "mix.vcf",
+        [
+            "1\t100\t.\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\n",  # common (AF 0.20) -> Benign by BA1
+            "1\t200\t.\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/1\n",  # rare LoF + ClinVar Pathogenic
+            "1\t300\t.\tG\tA\t.\tPASS\t.\tGT\t0/0\t0/1\n",  # absent missense (PM2 + PP3)
+        ],
+    )
+    af_by_pos = {100: 0.20, 200: 1e-5, 300: None}
+    vep_by_pos = {
+        100: {"most_severe": "intron_variant", "gene": "GENA", "gene_id": "ENSG1",
+              "amino_acids": None, "sift": None, "polyphen": None,
+              "annotation_available": True, "gnomad_af": None},
+        200: {"most_severe": "stop_gained", "gene": "GENB", "gene_id": "ENSG2",
+              "amino_acids": None, "sift": None, "polyphen": None,
+              "annotation_available": True, "gnomad_af": None},
+        300: {"most_severe": "missense_variant", "gene": "GENC", "gene_id": "ENSG3",
+              "amino_acids": "V/M", "sift": "deleterious", "polyphen": "probably_damaging",
+              "annotation_available": True, "gnomad_af": None},
+    }
+    deep_calls = {"clinvar": set(), "constraint": set()}
+
+    monkeypatch.setattr(rx, "_annotation_workers", lambda: 4)
+    monkeypatch.setattr(rx, "vep", lambda v, assembly: vep_by_pos[v["pos"]])
+    monkeypatch.setattr(rx, "gnomad_af", lambda v, return_status=False: (af_by_pos[v["pos"]], True))
+
+    def fake_constraint(gene, cache):
+        deep_calls["constraint"].add(gene)
+        if gene == "GENB":
+            return {"pli": 0.99, "loeuf": 0.2, "available": True}
+        return {"pli": None, "loeuf": None, "available": True}
+
+    monkeypatch.setattr(rx, "gnomad_constraint", fake_constraint)
+
+    def fake_clinvar(v, email, assembly):
+        deep_calls["clinvar"].add(v["pos"])
+        if v["pos"] == 200:
+            return {"significance": "Pathogenic", "stars": 2, "conditions": ["Cond"], "available": True}
+        return {"significance": None, "stars": 0, "conditions": [], "available": True}
+
+    monkeypatch.setattr(rx, "clinvar", fake_clinvar)
+
+    result = rx.run_pipeline(path, sample="REQUESTED", assembly="GRCh38")
+    variants = {v["pos"]: v for v in result["variants"]}
+
+    assert len(result["variants"]) == 3
+    # Common variant is Benign by BA1 and never touched the expensive layers.
+    assert variants[100]["call"] == "Benign"
+    assert 100 not in deep_calls["clinvar"]
+    assert "GENA" not in deep_calls["constraint"]
+    # Only the plausible candidates got deep annotation.
+    assert deep_calls["clinvar"] == {200, 300}
+    # Rare ClinVar-pathogenic LoF outranks the common benign variant.
+    assert variants[200]["rank"] < variants[100]["rank"]
+    assert variants[200]["combined"] > variants[100]["combined"]
+    assert "PS_ClinVar" in variants[200]["acmg_tags"]
+    # PM2 assigned to the absent variant; per-criterion evidence text is preserved.
+    assert "PM2" in variants[300]["acmg_tags"]
+    assert "PM2:" in variants[300]["evidence"]
+    # Every service answered, so no availability warnings were raised.
+    assert not any("unavailable" in w for w in result["warnings"])

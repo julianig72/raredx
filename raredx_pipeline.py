@@ -27,7 +27,8 @@ Requires: requests  (pip install requests)
 NOTE: run respectfully - the script paces requests. NCBI asks for a contact email;
 pass --email you@inst.org to be a good citizen (optional).
 """
-import argparse, asyncio, json, sys, time, html, datetime, re, threading
+import argparse, asyncio, json, os, sys, time, html, datetime, re, threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 ENSEMBL="https://rest.ensembl.org"
@@ -87,6 +88,54 @@ def _retry_wait(attempt):
             raise AnalysisCancelled("analysis cancelled by user")
     else:
         time.sleep(delay)
+
+
+def _annotation_workers():
+    """Concurrency for live-API annotation (env RAREDX_ANNOTATION_WORKERS, default 8)."""
+    try:
+        return max(1,int(os.environ.get("RAREDX_ANNOTATION_WORKERS","8")))
+    except (TypeError,ValueError):
+        return 8
+
+
+def _prefilter_af_cutoff():
+    """Population AF at/above which a variant is Benign by BA1 (env RAREDX_PREFILTER_AF)."""
+    try:
+        return float(os.environ.get("RAREDX_PREFILTER_AF","0.05"))
+    except (TypeError,ValueError):
+        return 0.05
+
+
+def _map_concurrent(items, fn, workers, on_progress=None):
+    """Apply fn to each item across a thread pool, preserving input order.
+
+    fn must re-inject the per-request deadline/cancel into its own worker thread
+    (thread-local state does not propagate automatically). The first cancellation,
+    timeout, or error is re-raised after the remaining futures are cancelled. Falls back
+    to a serial loop for a single worker or a single item.
+    """
+    n=len(items)
+    if n==0:
+        return []
+    if workers<=1 or n==1:
+        out=[]
+        for k,it in enumerate(items,1):
+            out.append(fn(it))
+            if on_progress: on_progress(k)
+        return out
+    out=[None]*n
+    done=0
+    with ThreadPoolExecutor(max_workers=min(workers,n)) as ex:
+        futures={ex.submit(fn,it):idx for idx,it in enumerate(items)}
+        try:
+            for fut in as_completed(futures):
+                out[futures[fut]]=fut.result()
+                done+=1
+                if on_progress: on_progress(done)
+        except BaseException:
+            ex.shutdown(wait=False,cancel_futures=True)
+            raise
+    return out
 
 
 def _get(url, **kw):
@@ -682,6 +731,7 @@ def gene_pheno_score(ensg, patient_ids, patient_full, return_status=False):
 
 # ---------- AI module A: ESM-2 missense pathogenicity (optional) ----------
 _ESM_CACHE = {}
+_ESM_LOCK = threading.Lock()
 def esm_score_missense(seq, pos1, wt_aa, mut_aa, model_name="esm2_t6_8M_UR50D", window=511):
     """Masked-marginal log-likelihood ratio log P(mut)/P(wt) from ESM-2.
     Negative => mutation less likely than WT under the protein LM (deleterious).
@@ -694,8 +744,10 @@ def esm_score_missense(seq, pos1, wt_aa, mut_aa, model_name="esm2_t6_8M_UR50D", 
     if not seq or not (1 <= pos1 <= len(seq)) or seq[pos1-1] != wt_aa:
         return None
     if model_name not in _ESM_CACHE:
-        model, alphabet = getattr(esm.pretrained, model_name)()
-        _ESM_CACHE[model_name] = (model.eval(), alphabet, alphabet.get_batch_converter())
+        with _ESM_LOCK:
+            if model_name not in _ESM_CACHE:
+                model, alphabet = getattr(esm.pretrained, model_name)()
+                _ESM_CACHE[model_name] = (model.eval(), alphabet, alphabet.get_batch_converter())
     model, alphabet, bc = _ESM_CACHE[model_name]
     half = window // 2
     start = max(0, pos1-1-half); end = min(len(seq), start+window); start = max(0, end-window)
@@ -1739,33 +1791,73 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
 
     cons_cache={}
     pheno_cache={}
-    vep_failures=gnomad_failures=clinvar_failures=constraint_failures=0
-    am_attempts=am_failures=esm_attempts=esm_failures=pheno_failures=0
-    for i,v in enumerate(variants,1):
+    AF_COMMON=_prefilter_af_cutoff()
+    n_workers=_annotation_workers()
+    _deadline=getattr(_REQUEST_STATE,"deadline",None)
+    _cancel=getattr(_REQUEST_STATE,"cancel_event",None)
+
+    def _annotate_frequency(v):
+        """Phase 1 (cheap): consequence + population allele frequency only."""
+        set_request_deadline(_deadline); set_request_cancel_event(_cancel)
         _request_timeout()
         ve=vep(v, assembly); v.update(consequence=ve.get("most_severe"), gene=ve.get("gene"),
                             gene_id=ve.get("gene_id"), protein=ve.get("amino_acids"),
                             sift=ve.get("sift"), polyphen=ve.get("polyphen"))
-        if not ve.get("annotation_available"):
-            vep_failures+=1
+        vep_ok=bool(ve.get("annotation_available"))
         if assembly=="GRCh38":
-            v["af"],af_available=gnomad_af(v,return_status=True)
+            v["af"],af_ok=gnomad_af(v,return_status=True)
         else:
-            v["af"],af_available=ve.get("gnomad_af"),bool(ve.get("annotation_available"))
-        v["af_status"]=("observed" if v["af"] is not None else "absent" if af_available else "unavailable")
-        if not af_available:
-            gnomad_failures+=1
+            v["af"],af_ok=ve.get("gnomad_af"),vep_ok
+        v["af_status"]=("observed" if v["af"] is not None else "absent" if af_ok else "unavailable")
+        v["_af_ok"]=af_ok
+        return {"vep_ok":vep_ok,"af_ok":af_ok}
+
+    def _default_deep_fields(v):
+        v["pli"]=None; v["loeuf"]=None
+        v["clinvar"]=None; v["stars"]=None; v["conditions"]=None
+        v["esm2_llr"]=None; v["esm2_call"]=""
+        v["am_pathogenicity"]=None; v["am_call"]=""
+
+    def _finalize(v, do_pheno):
+        """Build ACMG tags from the evidence on v, classify, and optionally score phenotype."""
+        extra_tags=[]
+        if v["esm2_call"]=="deleterious": extra_tags.append(("PP3_ESM",f"ESM-2 LLR {v['esm2_llr']} (deleterious)"))
+        elif v["esm2_call"]=="tolerated": extra_tags.append(("BP4_ESM",f"ESM-2 LLR {v['esm2_llr']} (tolerated)"))
+        if v["am_call"]=="deleterious": extra_tags.append(("PP3_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_pathogenic)"))
+        elif v["am_call"]=="tolerated": extra_tags.append(("BP4_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_benign)"))
+        call,tags=classify(v["af"],v["consequence"],v["pli"],v["loeuf"],v["clinvar"],v["stars"],
+                           v["sift"],v["polyphen"],af_available=v.get("_af_ok",True),extra_tags=extra_tags)
+        v["call"]=call
+        v["_tags"]=tags
+        if do_pheno and patient_ids:
+            gene_id=v.get("gene_id")
+            if gene_id not in pheno_cache:
+                pheno_cache[gene_id]=gene_pheno_score(
+                    gene_id,patient_ids,patient_full,return_status=True
+                )
+            ps,pd_,pm_,pdis,psh,pheno_available=pheno_cache[gene_id]
+            v.update(pheno_score=ps,pheno_direct=pd_,pheno_matched=pm_,pheno_disease=pdis,pheno_shared=psh)
+            return bool(gene_id) and not pheno_available
+        v.update(pheno_score=0.0,pheno_direct=0,pheno_matched=0,pheno_disease="",pheno_shared="")
+        return False
+
+    def _annotate_deep(v):
+        """Phase 2 (expensive): constraint, ClinVar, ESM/AM, classification, phenotype."""
+        set_request_deadline(_deadline); set_request_cancel_event(_cancel)
+        flags={"clinvar_ok":True,"constraint_ok":True,"am_attempt":False,"am_ok":True,
+               "esm_attempt":False,"esm_ok":True,"pheno_failed":False}
+        _request_timeout()
         con=gnomad_constraint(v["gene"], cons_cache) if v.get("gene") else {"pli":None,"loeuf":None}
         v["pli"],v["loeuf"]=con.get("pli"),con.get("loeuf")
         if v.get("gene") and not con.get("available"):
-            constraint_failures+=1
+            flags["constraint_ok"]=False
         cv=clinvar(v,email,assembly); v.update(clinvar=cv.get("significance"), stars=cv.get("stars"),
                                       conditions=cv.get("conditions"), protein=v.get("protein") or cv.get("protein_change"))
         if not cv.get("available"):
-            clinvar_failures+=1
+            flags["clinvar_ok"]=False
         v["esm2_llr"]=None; v["esm2_call"]=""
         if use_esm and v["consequence"]=="missense_variant":
-            esm_attempts+=1
+            flags["esm_attempt"]=True
             ctx=protein_context(v.get("rsid"),v["chrom"],v["pos"],v["ref"],v["alt"],
                                 v.get("gene"),assembly=assembly)
             if ctx:
@@ -1773,41 +1865,58 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
                 v["esm2_call"]=esm_call(v["esm2_llr"])
                 v["protein"]=v.get("protein") or ctx["protein_change"]
             if v["esm2_llr"] is None:
-                esm_failures+=1
+                flags["esm_ok"]=False
         v["am_pathogenicity"]=None; v["am_call"]=""
         if use_am and v["consequence"]=="missense_variant":
-            am_attempts+=1
+            flags["am_attempt"]=True
             am=alphamissense_score(v["chrom"], v["pos"], v["ref"], v["alt"], assembly=assembly, gene=v.get("gene"))
             if am:
                 v["am_pathogenicity"]=am["am_pathogenicity"]; v["am_call"]=am_call(am)
             else:
-                am_failures+=1
-        extra_tags=[]
-        if v["esm2_call"]=="deleterious": extra_tags.append(("PP3_ESM",f"ESM-2 LLR {v['esm2_llr']} (deleterious)"))
-        elif v["esm2_call"]=="tolerated": extra_tags.append(("BP4_ESM",f"ESM-2 LLR {v['esm2_llr']} (tolerated)"))
-        if v["am_call"]=="deleterious": extra_tags.append(("PP3_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_pathogenic)"))
-        elif v["am_call"]=="tolerated": extra_tags.append(("BP4_AM",f"AlphaMissense {v['am_pathogenicity']} (likely_benign)"))
-        call,tags=classify(v["af"],v["consequence"],v["pli"],v["loeuf"],v["clinvar"],v["stars"],
-                           v["sift"],v["polyphen"],af_available=af_available,extra_tags=extra_tags)
-        v["call"]=call
-        v["_tags"]=tags
-        if patient_ids:
-            gene_id=v.get("gene_id")
-            if gene_id not in pheno_cache:
-                pheno_cache[gene_id]=gene_pheno_score(
-                    gene_id,patient_ids,patient_full,return_status=True
-                )
-            ps,pd_,pm_,pdis,psh,pheno_available=pheno_cache[gene_id]
-            if gene_id and not pheno_available:
-                pheno_failures+=1
-            v.update(pheno_score=ps,pheno_direct=pd_,pheno_matched=pm_,pheno_disease=pdis,pheno_shared=psh)
-        else:
-            v.update(pheno_score=0.0,pheno_direct=0,pheno_matched=0,pheno_disease="",pheno_shared="")
-        if i % 10 == 0 or i == len(variants):
-            _prog(i, len(variants), f"Anotando variantes: {i}/{len(variants)}")
+                flags["am_ok"]=False
+        flags["pheno_failed"]=_finalize(v, do_pheno=True)
+        return flags
 
-    if vep_failures==len(variants):
+    # Phase 1: consequence + population allele frequency for every called variant (concurrent).
+    total=len(variants)
+    freq_flags=_map_concurrent(
+        variants, _annotate_frequency, n_workers,
+        lambda done: (done % 20 == 0 or done == total)
+                     and _prog(done, total, f"Anotando frecuencias: {done}/{total}"))
+    vep_failures=sum(1 for f in freq_flags if not f["vep_ok"])
+    gnomad_failures=sum(1 for f in freq_flags if not f["af_ok"])
+
+    if vep_failures==total:
         raise RuntimeError("Ensembl VEP unavailable for every variant; analysis aborted")
+
+    # Prefilter: variants at population AF >= 5% are Benign by BA1 (see classify/_call_from_tags,
+    # where BA1 short-circuits every other criterion). Skip the expensive evidence layers
+    # (constraint/ClinVar/ESM/AlphaMissense/phenotype) for them and classify directly — the
+    # verdict is identical, and the deep budget is spent only on plausible candidates.
+    common=[v for v in variants if v.get("af") is not None and v["af"]>=AF_COMMON]
+    candidates=[v for v in variants if not (v.get("af") is not None and v["af"]>=AF_COMMON)]
+    for v in common:
+        _default_deep_fields(v)
+        _finalize(v, do_pheno=False)
+    _prog(0, total,
+          f"Prefiltrado: {len(candidates)} candidatas para análisis profundo "
+          f"({len(common)} comunes AF≥{AF_COMMON:.0%} clasificadas como benignas)")
+
+    # Phase 2: deep evidence only for the plausible candidates (concurrent).
+    n_cand=len(candidates)
+    deep_flags=_map_concurrent(
+        candidates, _annotate_deep, n_workers,
+        lambda done: (done % 10 == 0 or done == n_cand)
+                     and _prog(done, n_cand, f"Análisis profundo de candidatas: {done}/{n_cand}"))
+    clinvar_failures=sum(1 for f in deep_flags if not f["clinvar_ok"])
+    constraint_failures=sum(1 for f in deep_flags if not f["constraint_ok"])
+    am_attempts=sum(1 for f in deep_flags if f["am_attempt"])
+    am_failures=sum(1 for f in deep_flags if f["am_attempt"] and not f["am_ok"])
+    esm_attempts=sum(1 for f in deep_flags if f["esm_attempt"])
+    esm_failures=sum(1 for f in deep_flags if f["esm_attempt"] and not f["esm_ok"])
+    pheno_failures=sum(1 for f in deep_flags if f["pheno_failed"])
+    for v in variants:
+        v.pop("_af_ok",None)
     if vep_failures:
         warnings.append(f"Ensembl VEP unavailable for {vep_failures} variant(s)")
     if gnomad_failures:
