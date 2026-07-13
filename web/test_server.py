@@ -323,6 +323,27 @@ def test_persisted_session_survives_data_dir_cleanup():
         shutil.rmtree(src, ignore_errors=True)
 
 
+def test_jobs_survives_malformed_metadata(tmp_path):
+    """A session whose metadata.json is valid JSON but not an object (or is truncated) must not
+    take down the whole /api/jobs listing — it should still be listed via CSV/mtime fallback."""
+    bad, good = "dddddddd0001", "eeeeeeee0002"
+    db = _make_session_dir(bad, rows=2, created_ts=time.time() - 50)
+    dg = _make_session_dir(good, rows=6, created_ts=time.time())
+    # overwrite the bad session's metadata with non-object JSON (null)
+    (db / "metadata.json").write_text("null", encoding="utf-8")
+    try:
+        r = client.get("/api/jobs")
+        assert r.status_code == 200
+        by_id = {j["job_id"]: j for j in r.json()["jobs"]}
+        assert bad in by_id and good in by_id           # listing not poisoned by the bad file
+        assert by_id[bad]["n_variants"] == 2            # recovered from the CSV row count
+        assert by_id[good]["n_variants"] == 6
+    finally:
+        import shutil
+        shutil.rmtree(db, ignore_errors=True)
+        shutil.rmtree(dg, ignore_errors=True)
+
+
 def test_report_rejects_invalid_job_id():
     # non-hex id: fails the JOB_ID_RE guard and is absent from JOBS -> 404
     assert client.get("/api/report/not-a-valid-id").status_code == 404

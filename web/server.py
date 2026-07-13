@@ -458,46 +458,52 @@ def jobs():
              for jid,j in JOBS.items()}
     out=[]
     for directory in SESSIONS_DIR.iterdir():
-        if not directory.is_dir() or not JOB_ID_RE.match(directory.name):
-            continue
-        report_path=directory / "result_report.html"
-        if not report_path.exists():
-            continue
-        csv_path=directory / "result_annotated.csv"
-        meta={}
-        meta_path=directory / "metadata.json"
-        if meta_path.exists():
-            try:
-                meta=json.loads(meta_path.read_text(encoding="utf-8"))
-            except (OSError,ValueError):
+        try:
+            if not directory.is_dir() or not JOB_ID_RE.match(directory.name):
+                continue
+            report_path=directory / "result_report.html"
+            if not report_path.exists():
+                continue
+            csv_path=directory / "result_annotated.csv"
+            meta={}
+            meta_path=directory / "metadata.json"
+            if meta_path.exists():
+                try:
+                    meta=json.loads(meta_path.read_text(encoding="utf-8"))
+                except (OSError,ValueError):
+                    meta={}
+            if not isinstance(meta,dict):  # valid JSON but not an object (null/list/number/str)
                 meta={}
-        info=mem.get(directory.name,{})
-        n_variants=meta.get("n_variants")
-        if n_variants is None:
-            n_variants=info.get("n_variants")
-        if n_variants is None and csv_path.exists():
-            try:
-                import csv as _csv
-                with open(csv_path,encoding="utf-8",newline="") as fh:
-                    n_variants=max(0,sum(1 for _ in _csv.reader(fh))-1)
-            except OSError:
-                n_variants=None
-        out.append({
-            "job_id":directory.name,
-            "modified":meta.get("created_ts") or report_path.stat().st_mtime,
-            "created":meta.get("created"),
-            "n_variants":n_variants,
-            "sample":meta.get("sample") or info.get("sample"),
-            "assembly":meta.get("assembly") or info.get("assembly"),
-            "hpo":meta.get("hpo"),
-            "expanded_hpo":meta.get("expanded_hpo"),
-            "top_gene":meta.get("top_gene"),
-            "top_call":meta.get("top_call"),
-            "ai_layers":meta.get("ai_layers",[]),
-            "n_warnings":meta.get("n_warnings"),
-            "status":info.get("status") or "done",
-            "has_csv":csv_path.exists(),
-        })
+            info=mem.get(directory.name,{})
+            n_variants=meta.get("n_variants")
+            if n_variants is None:
+                n_variants=info.get("n_variants")
+            if n_variants is None and csv_path.exists():
+                try:
+                    import csv as _csv
+                    with open(csv_path,encoding="utf-8",newline="") as fh:
+                        n_variants=max(0,sum(1 for _ in _csv.reader(fh))-1)
+                except OSError:
+                    n_variants=None
+            out.append({
+                "job_id":directory.name,
+                "modified":meta.get("created_ts") or report_path.stat().st_mtime,
+                "created":meta.get("created"),
+                "n_variants":n_variants,
+                "sample":meta.get("sample") or info.get("sample"),
+                "assembly":meta.get("assembly") or info.get("assembly"),
+                "hpo":meta.get("hpo"),
+                "expanded_hpo":meta.get("expanded_hpo"),
+                "top_gene":meta.get("top_gene"),
+                "top_call":meta.get("top_call"),
+                "ai_layers":meta.get("ai_layers",[]),
+                "n_warnings":meta.get("n_warnings"),
+                "status":info.get("status") or "done",
+                "has_csv":csv_path.exists(),
+            })
+        except OSError:
+            # a single unreadable/corrupt session dir must not take down the whole listing
+            continue
     out.sort(key=lambda item:item["modified"],reverse=True)
     return {"jobs":out[:100]}
 

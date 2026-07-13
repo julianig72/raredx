@@ -98,12 +98,27 @@ def _annotation_workers():
         return 8
 
 
+# Population allele frequency at/above which ACMG BA1 applies (stand-alone Benign). This is the
+# single source of truth for both classify() and the annotation prefilter — they MUST agree, or
+# the prefilter could route a sub-BA1 variant into the "Benign, skip deep layers" path where it
+# is neither truly Benign nor deeply analysed (a potential false negative).
+BA1_AF_THRESHOLD = 0.05
+
+
 def _prefilter_af_cutoff():
-    """Population AF at/above which a variant is Benign by BA1 (env RAREDX_PREFILTER_AF)."""
+    """Population AF at/above which the prefilter classifies a variant as Benign and skips the
+    deep evidence layers (env RAREDX_PREFILTER_AF, default 0.05).
+
+    The value is floored at BA1_AF_THRESHOLD: raising it above 0.05 only makes the prefilter more
+    conservative (fewer variants skipped), which is safe. Lowering it below 0.05 would be unsafe
+    (variants in [cutoff, 0.05) get BS1/VUS from classify, not BA1, and would wrongly skip
+    ClinVar/phenotype), so such values are clamped up to the BA1 line.
+    """
     try:
-        return float(os.environ.get("RAREDX_PREFILTER_AF","0.05"))
+        value=float(os.environ.get("RAREDX_PREFILTER_AF","0.05"))
     except (TypeError,ValueError):
-        return 0.05
+        return BA1_AF_THRESHOLD
+    return max(value, BA1_AF_THRESHOLD)
 
 
 def _map_concurrent(items, fn, workers, on_progress=None):
@@ -575,7 +590,7 @@ def _call_from_tags(tags, sig=""):
 
 def classify(af, cons, pli, loeuf, sig, stars, sift, poly, af_available=True, extra_tags=None):
     tags=[]
-    if af is not None and af>=0.05: tags.append(("BA1",f"gnomAD AF {af:.3f} >=5%"))
+    if af is not None and af>=BA1_AF_THRESHOLD: tags.append(("BA1",f"gnomAD AF {af:.3f} >=5%"))
     elif af is not None and af>=0.01: tags.append(("BS1",f"gnomAD AF {af:.3f} >=1%"))
     if not af_available: tags.append(("gnomAD_unavailable","gnomAD lookup unavailable; absence not assessed"))
     elif af is None: tags.append(("PM2","absent from gnomAD r4"))

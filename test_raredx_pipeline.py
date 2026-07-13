@@ -1065,6 +1065,21 @@ def test_prefilter_skips_deep_layers_for_common_variants_and_ranks_candidates(tm
     assert not any("unavailable" in w for w in result["warnings"])
 
 
+def test_prefilter_cutoff_is_floored_at_ba1_threshold(monkeypatch):
+    # BA1 (classify) and the prefilter must share one threshold, so a sub-BA1 env value is
+    # clamped up — otherwise variants in [cutoff, 0.05) would skip the deep layers without
+    # actually being Benign (a potential false negative).
+    assert rx.BA1_AF_THRESHOLD == 0.05
+    monkeypatch.setenv("RAREDX_PREFILTER_AF", "0.02")
+    assert rx._prefilter_af_cutoff() == 0.05          # clamped up to the BA1 line
+    monkeypatch.setenv("RAREDX_PREFILTER_AF", "0.10")
+    assert rx._prefilter_af_cutoff() == 0.10          # raising it (more conservative) is honored
+    monkeypatch.setenv("RAREDX_PREFILTER_AF", "not-a-number")
+    assert rx._prefilter_af_cutoff() == 0.05          # invalid -> safe default
+    monkeypatch.delenv("RAREDX_PREFILTER_AF", raising=False)
+    assert rx._prefilter_af_cutoff() == 0.05
+
+
 def test_hpo_expansion_is_opt_in_not_automatic(tmp_path, monkeypatch):
     path = write_vcf(
         tmp_path / "one.vcf",
