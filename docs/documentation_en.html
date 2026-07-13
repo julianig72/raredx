@@ -74,10 +74,11 @@ live public REST APIs; no local databases are maintained.</p>
 
 <h2 id="inputs">Inputs and assembly detection</h2>
 <p>The primary input is a VCF file. The parser extracts, per record: chromosome (the <code>chr</code>
-prefix is stripped; <code>chrM</code>→<code>MT</code>), position, ref, first alt allele, rsID, QUAL,
+prefix is stripped), position, ref, every alt allele, rsID, QUAL,
 FILTER, and the sample genotype field (<code>GT</code> and the remaining FORMAT keys, retained for
-zygosity reasoning). The assembly is set with <code>--assembly {GRCh38|GRCh37}</code> (default
-GRCh38). GRCh37/hg19 support is first-class: annotation uses the Ensembl VEP GRCh37 endpoint, and
+zygosity reasoning). By default the assembly is detected from <code>##reference</code> or standard
+contig lengths; it can be overridden with <code>--assembly {GRCh38|GRCh37}</code>. GRCh37/hg19 support
+is first-class: annotation uses the Ensembl VEP GRCh37 endpoint, and
 where a source exists only in GRCh38 (AlphaMissense), the coordinate is <b>lifted to GRCh38
 per variant</b> through the Ensembl assembly-mapping service.</p>
 
@@ -112,19 +113,22 @@ The implemented thresholds are:</p>
 <tr><td><code>BA1</code></td><td>gnomAD AF ≥ 0.05</td><td>benign (strong)</td></tr>
 <tr><td><code>BS1</code></td><td>gnomAD AF ≥ 0.01</td><td>benign (strong)</td></tr>
 <tr><td><code>PM2</code></td><td>absent from gnomAD r4, or AF &lt; 1×10⁻⁴</td><td>pathogenic (moderate)</td></tr>
-<tr><td><code>PVS1</code></td><td>LoF consequence (stop_gained, frameshift, splice donor/acceptor) <b>in a constrained gene</b> (pLI ≥ 0.9 or LOEUF &lt; 0.6); if constraint is modest → <code>PVS1_mod</code></td><td>pathogenic (very strong)</td></tr>
+<tr><td><code>LoF_predicted</code></td><td>LoF consequence (stop_gained, frameshift, splice donor/acceptor). pLI/LOEUF is retained as context but does not activate PVS1</td><td>prioritization; not classifying by itself</td></tr>
 <tr><td><code>PP3</code> / <code>BP4</code></td><td>SIFT deleterious &amp; PolyPhen damaging → PP3; SIFT tolerated &amp; PolyPhen benign → BP4</td><td>both directions</td></tr>
 <tr><td><code>PP3_ESM</code> / <code>BP4_ESM</code></td><td>ESM-2 call (see §3)</td><td>both directions</td></tr>
 <tr><td><code>PP3_AM</code> / <code>BP4_AM</code></td><td>AlphaMissense call (see §3)</td><td>both directions</td></tr>
 <tr><td><code>PS_ClinVar</code> / <code>PP5_ClinVar</code></td><td>ClinVar "pathogenic": ≥2★ → PS; &lt;2★ → PP5</td><td>pathogenic</td></tr>
 <tr><td><code>BS_ClinVar</code> / <code>BP6_ClinVar</code></td><td>ClinVar "benign": ≥2★ → BS; &lt;2★ → BP6</td><td>benign</td></tr>
 </tbody></table>
-<p>Tag combination yields the verdict: strong benign evidence with no pathogenic → <b>Benign/Likely
-benign</b>; <code>PVS1</code> + (<code>PM2</code> or <code>PS_ClinVar</code>) → <b>Pathogenic</b>;
-strong pathogenic evidence → <b>Likely pathogenic</b>; ≥2 supporting pathogenic evidences without
-benign → <b>Likely pathogenic</b>, a single one → <b>VUS</b>; supporting benign only → <b>Likely
-benign</b>; otherwise <b>VUS</b>. Variants flagged "drug response" in ClinVar are additionally tagged
-pharmacogenomic.</p>
+<p>The class is determined with ACMG/AMP strength combinations, not a point sum. For example, PVS1
+(very strong) + PM2 (moderate) yields <b>Likely pathogenic</b>; <b>Pathogenic</b> requires PVS1 plus
+one strong, PVS1 plus two moderate, PVS1 plus one moderate and one supporting, PVS1 plus two
+supporting, two strong, or another equivalent ACMG combination. The engine does not assign PVS1
+automatically: a predicted LoF remains <code>LoF_predicted</code> until disease mechanism,
+transcript relevance, NMD, and functional region have been reviewed. pLI/LOEUF alone is
+insufficient. <code>BA1</code> is a stand-alone benign rule, and conflicting pathogenic/benign
+evidence is forced to VUS. Numeric weights are used only to rank variants, not to define the
+class.</p>
 
 <h2 id="ai-missense">3 · AI predictors for missense variants</h2>
 <p>For missense variants, two modern in-silico predictors are added that feed PP3/BP4, superseding the
@@ -160,11 +164,12 @@ evidence (PP3/BP4), never as a sole arbiter.</p>
 retrieved from <b>Open Targets</b> (GraphQL) and, per disease, its HPO phenotypes
 (<code>phenotypeHPO</code>; Open Targets serves them in underscore form, <code>HP_xxxxxxx</code>,
 normalized to <code>HP:xxxxxxx</code>). The patient HPO profile is expanded ontologically with its
-ancestors. The <code>pheno_score</code> weights direct matches more strongly than ancestor-only
-matches:</p>
-<div class="eq">pheno_score = ( n<sub>direct</sub> · 1.0 + n<sub>ancestor-only</sub> · 0.4 ) / n<sub>patient HPO</sub>   (capped at 1.0)</div>
-<p>The disease with the most direct matches and its shared terms are also retained, to display them as
-evidence of the phenotype–gene match.</p>
+ancestors. For each disease, direct matches are weighted more strongly than ancestor-only matches,
+and the Open Targets association strength is included:</p>
+<div class="eq">disease_score = association<sub>OT</sub> · min(1, (n<sub>direct</sub> + 0.4·n<sub>ancestor-only</sub>) / n<sub>patient HPO</sub>)</div>
+<p>The <code>pheno_score</code> is the maximum score from one disease; phenotypes from different
+diseases of the same gene are never merged. The selected disease and shared terms are displayed.
+A profile with only one direct HPO term produces a low-specificity warning.</p>
 
 <h2 id="ia1">5 · Phenotype extraction from free text (LLM)</h2>
 <p>As an alternative to entering HPO codes manually, a <b>clinical note in natural language</b> can be
@@ -173,12 +178,17 @@ history, and treatments) and returns, for each, the verbatim phrase that justifi
 grounded to an official HPO term by searching <b>OLS4</b> (ontology <code>hp</code>), preferring an
 exact label match. It works across languages and over colloquial descriptions, not just formal
 terminology. The phrase→HPO traceability is kept in the result.</p>
+<p>The default provider is <b>GitHub Copilot</b> through its official SDK, running without tools,
+memory, or repository instructions. Anthropic can be configured as a fallback. The clinical note is
+sent to the selected provider, so its use must comply with the organization's clinical-data policy.</p>
+<p>In the web interface extraction is a separate step: the clinician selects <b>Extract HPO</b>,
+reviews each label, identifier, and evidence quote, and can deselect or edit terms before analysis.</p>
 
 <h2 id="combined">6 · Combined scoring and ranking</h2>
-<p>The <code>variant_score</code> (0–1) is obtained by normalizing the ACMG-lite evidence and modulating
-it with the missense AI calls: an ESM-2 <i>deleterious</i> call adds +0.08 and a <i>tolerated</i> call
-subtracts −0.08; AlphaMissense weighs slightly more (±0.10) as a clinically calibrated predictor. When
-a phenotype is present, the final score integrates both engines:</p>
+<p>The <code>variant_score</code> (0–1) is an absolute weighted ACMG-lite score; it is not normalized
+against the other variants in the VCF. ESM-2 and AlphaMissense contribute <code>PP3</code>/<code>BP4</code>
+evidence before the final classification and score are computed. When a phenotype is present, the
+final score integrates both engines:</p>
 <div class="eq">combined = 0.55 · variant_score + 0.45 · pheno_score       (× 0.5 if the variant fails the VCF FILTER)</div>
 <p>Variants are sorted by <code>combined</code> in descending order. The effect is that, between two
 variants with similar molecular evidence, the one matching the clinical presentation rises — the
@@ -218,7 +228,7 @@ assigned from the presence of the alt allele:</p>
 <table>
 <thead><tr><th>Mode</th><th>Condition</th><th>Effect</th></tr></thead>
 <tbody>
-<tr><td><code>de_novo</code></td><td>alt in the child, absent from <b>both</b> genotyped parents</td><td>adds the ACMG <b>PS2</b> criterion (supporting strong) and a score bonus</td></tr>
+<tr><td><code>de_novo</code></td><td>alt in the child and an explicit no-alt call (for example <code>0/0</code>) in <b>both</b> parents</td><td>adds ACMG <b>PS2</b> and recomputes classification and score</td></tr>
 <tr><td><code>paternal</code> / <code>maternal</code></td><td>alt present in a single parent</td><td>inherited</td></tr>
 <tr><td><code>biparental</code></td><td>alt in both, heterozygous child</td><td>inherited from both</td></tr>
 <tr><td><code>homozygous_recessive</code></td><td>homozygous child, both parents carriers</td><td>compatible with recessive inheritance</td></tr>
@@ -226,6 +236,8 @@ assigned from the presence of the alt allele:</p>
 <p>The result is added to the CSV (<code>inheritance</code>, <code>father_gt</code>,
 <code>mother_gt</code>) and the report shows an "Inheritance" column. <i>De novo</i> detection
 requires both parents to be genotyped at that locus; with a single parent the call is partial.</p>
+<p>A site missing from a variant-only parental VCF is not evidence of a reference genotype and is
+never sufficient on its own for a <i>de novo</i> call.</p>
 
 <h2 id="outputs">8 · Outputs</h2>
 <ul>

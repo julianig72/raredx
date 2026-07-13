@@ -20,20 +20,22 @@ Guía de despliegue de la herramienta web: [`web/README.md`](web/README.md).
 
 ## Instalación
 
-Requiere **Python 3.10+**. La única dependencia obligatoria es `requests`; las capas de IA
-tienen dependencias opcionales que solo se instalan si vas a usarlas.
+Requiere **Python 3.11+**. GitHub Copilot es el proveedor LLM predeterminado para la nota clínica
+y la capa agéntica; Anthropic queda disponible como fallback opcional.
 
 ```bash
 git clone https://github.com/julianig72/raredx.git
 cd raredx
 
-# 1) Núcleo (obligatorio) — anotación + fenotipo + AlphaMissense + capa agéntica sin dependencias pesadas
-pip install requests
+# 1) Núcleo + proveedor GitHub Copilot
+pip install -r requirements.txt
+python -m copilot download-runtime
+gh auth login   # cuenta con acceso a GitHub Copilot
 
 # 2) Opcional — ESM-2 (IA-2). Añade ~2 GB (PyTorch). Sin GPU usa el modelo 8M en CPU.
 pip install torch fair-esm
 
-# 3) Opcional — extracción de HPO desde nota clínica (IA-1) y capa agéntica (IA-4)
+# 3) Opcional — fallback Anthropic
 pip install anthropic
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
@@ -43,8 +45,9 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 | Anotación + fenotipo + ranking | `requests` | no |
 | AlphaMissense (IA-3) | *(nada extra)* — vía Ensembl VEP | no |
 | ESM-2 (IA-2) | `torch fair-esm` | GPU opcional (8M corre en CPU) |
-| HPO desde texto (IA-1) | `anthropic` | `ANTHROPIC_API_KEY` |
-| Capa agéntica (IA-4) | `anthropic` | `ANTHROPIC_API_KEY` |
+| HPO desde texto (IA-1) | `github-copilot-sdk` | sesión GitHub con Copilot |
+| Capa agéntica (IA-4) | `github-copilot-sdk` | sesión GitHub con Copilot |
+| Fallback LLM | `anthropic` | `ANTHROPIC_API_KEY` |
 
 > **Conexión a internet obligatoria:** todas las anotaciones se resuelven contra APIs REST en vivo.
 
@@ -155,20 +158,27 @@ si todos los candidatos se refutan. El CSV marca cada fila con `agentic_evaluate
 |------|--------|--------|
 | Consecuencia funcional | Ensembl VEP | missense/stop/frameshift + SIFT/PolyPhen |
 | Frecuencia poblacional | gnomAD r4 | AF (BA1/BS1: comun => benigna) |
-| Restriccion genica | gnomAD | pLI, LOEUF (PVS1 en genes intolerantes a LoF) |
+| Restriccion genica | gnomAD | pLI, LOEUF como contexto; no bastan para activar PVS1 |
 | Significancia clinica | ClinVar | veredicto + estrellas de oro |
 | **IA missense** | **ESM-2** | **LLR evolutivo -> PP3/BP4** |
 | **IA missense** | **AlphaMissense** | **patogenicidad 0-1 -> PP3/BP4** |
 
 ## Cómo se combina la evidencia (scoring)
 
-El motor calcula un `variant_score` (0-1) por variante a partir de la evidencia ACMG-lite, y lo
-modula con las capas de IA missense:
+El motor calcula un `variant_score` absoluto (0-1) por variante sumando pesos ACMG-lite; no lo
+normaliza contra las demás variantes del mismo VCF. Las capas de IA missense participan antes de
+la clasificación final:
 
+- Una consecuencia `frameshift`, `stop_gained` o de splicing se marca como `LoF_predicted`, pero
+  **no recibe PVS1 automáticamente**. PVS1 exige demostrar que la pérdida de función es el mecanismo
+  de la enfermedad y revisar transcrito, NMD y región funcional; pLI/LOEUF por sí solos no bastan.
+- La clase de cinco niveles usa combinaciones de fuerzas ACMG/AMP, no una suma de puntos. Incluso
+  cuando PVS1 se valida independientemente, `PVS1 + PM2` corresponde a **Likely pathogenic**, no a
+  **Pathogenic**.
 - **ESM-2** y **AlphaMissense** aportan `PP3` (deletérea) o `BP4` (tolerada) y ajustan el
-  `variant_score`; AlphaMissense pesa algo más por ser un predictor clínicamente calibrado. Como
-  son dos predictores independientes, se complementan: cuando el modelo ESM-2 8M falla en un caso
-  límite, AlphaMissense puede corregirlo (y viceversa), evitando depender de un único método.
+  `variant_score`; AlphaMissense pesa algo más por ser un predictor clínicamente calibrado. Para
+  evitar contar varias veces evidencia computacional correlacionada, todas las etiquetas de la
+  familia PP3 (o BP4) cuentan una sola vez en la clasificación.
 - La **frecuencia poblacional manda sobre el in-silico**: una variante que un predictor marque
   "deletérea" pero que sea común en gnomAD (regla `BA1`/`BS1`) se mantiene benigna — la IA no
   atropella la evidencia poblacional ni la clínica de ClinVar.
@@ -184,12 +194,16 @@ combined = 0.55 * variant_score + 0.45 * pheno_score     (× 0.5 si la variante 
 
 Así, entre dos variantes con evidencia molecular parecida, la que encaja con la clínica del
 paciente asciende en el ranking — el principio de priorización dirigida por fenotipo de Exomiser.
+El `pheno_score` se calcula para cada enfermedad por separado, multiplicando la cobertura HPO por
+la fuerza de asociación de Open Targets, y se conserva la mejor enfermedad. Nunca se suman
+fenotipos de enfermedades distintas del mismo gen. Un perfil con una sola HPO genera una
+advertencia de baja especificidad.
 
 ## Uso completo
 
 ```bash
 python raredx_pipeline.py input.vcf \
-       --assembly GRCh37 \              # build del VCF (GRCh38 por defecto)
+       --assembly GRCh37 \              # override opcional; por defecto se detecta desde el VCF
        --clinical-note nota.txt \       # IA-1: HPO desde texto (o --hpo "HP:...")
        --esm \                          # IA-2: ESM-2 en missense
        --alphamissense \                # IA-3: AlphaMissense en missense (sin GPU)
@@ -203,15 +217,27 @@ python raredx_pipeline.py input.vcf \
 
 **Análisis de trío (opcional).** Si se aportan los VCF de los progenitores (`--father`/`--mother`),
 cada variante candidata se clasifica por herencia buscando el mismo alelo en los padres:
-`de_novo` (ausente en ambos progenitores genotipados → añade el criterio ACMG **PS2**),
+`de_novo` (el hijo porta el alelo y ambos progenitores tienen una llamada explícita sin él —por
+ejemplo `0/0`— → añade el criterio ACMG **PS2**),
 `paterna`/`materna`, `biparental` u `homozygous_recessive`. Las columnas `inheritance`,
 `father_gt` y `mother_gt` se añaden al CSV, y el informe muestra una columna "Herencia".
+La mera ausencia del sitio en un VCF parental de solo variantes no se considera prueba de
+ausencia del alelo.
 
-**Dependencias:** `requests` (base); `torch fair-esm` (para `--esm`); `anthropic` +
-`ANTHROPIC_API_KEY` (para `--clinical-note` y `--agentic`). `--alphamissense` **no requiere
-dependencias extra ni GPU** (usa scores precalculados vía Ensembl VEP). Sin GPU, ESM-2 usa el
-modelo 8M en CPU. La capa `--agentic` degrada con elegancia: si no hay LLM disponible, el análisis
-se completa igual y el diferencial queda vacío.
+En un VCF con varias muestras es obligatorio indicar `--sample` con un identificador presente en
+la cabecera; el pipeline nunca selecciona silenciosamente la primera muestra.
+
+En la interfaz web, la expansión ontológica se muestra antes del análisis como una lista separada de
+términos directos y ancestros. El usuario puede eliminar o añadir términos y el motor conserva por
+separado los fenotipos directos para no convertir automáticamente todos los ancestros en coincidencias
+directas. Durante el análisis se muestran tiempo transcurrido, ritmo, ETA y capas activas, y puede
+solicitarse una cancelación segura desde la propia barra de progreso.
+
+**Dependencias:** `requests` (base); `github-copilot-sdk` + una sesión GitHub autenticada con
+Copilot (nota clínica y capa agéntica); `torch fair-esm` (para `--esm`). Anthropic puede configurarse
+como fallback con `ANTHROPIC_API_KEY`. `--alphamissense` **no requiere dependencias extra ni GPU**
+(usa scores precalculados vía Ensembl VEP). Sin GPU, ESM-2 usa el modelo 8M en CPU. Si no hay ningún
+LLM disponible, el análisis se completa y muestra una advertencia.
 
 ## Salidas
 - `<prefix>_report.html` - informe clinico: nota->HPO, ranking con LLR de ESM-2, fichas de evidencia
