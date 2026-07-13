@@ -1710,7 +1710,7 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
                  use_esm=False, use_am=False, agentic=False, reflect_k=8,
                  father_vcf=None, mother_vcf=None, email=None,
                  anthropic_key=None, progress=None, max_variants=None,
-                 reviewed_hpo_expansion=None):
+                 reviewed_hpo_expansion=None, expand_hpo_terms=False):
     """Annotate a VCF and prioritize variants. Reusable entry point for CLI and web server.
 
     Args:
@@ -1774,10 +1774,15 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
         hpo_expansion_available=len(reviewed_terms)==len(reviewed_tokens)
         if not hpo_expansion_available:
             warnings.append("Some reviewed expanded HPO terms could not be resolved")
-    elif patient_ids:
+    elif patient_ids and expand_hpo_terms:
         patient_full,hpo_expansion_available=expand_hpo(patient_ids,return_status=True)
         if not hpo_expansion_available:
             warnings.append("HPO ancestor expansion was partially unavailable; phenotype matching may be incomplete")
+    elif patient_ids:
+        # Default: match on the directly observed HPO terms only. Ancestor expansion is an
+        # opt-in step (reviewed_hpo_expansion from the UI, or expand_hpo_terms from the CLI),
+        # not something done automatically at the start of every analysis.
+        patient_full=set(patient_ids)
     else:
         patient_full=set()
     if len(patient_ids)==1:
@@ -1787,7 +1792,11 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
             "phenotype ranking has low specificity. Add other observed clinical "
             "features before interpreting gene order."
         )
-    if patient_hpo: _prog(0, len(variants), f"{len(patient_ids)} términos HPO (expandidos a {len(patient_full)})")
+    if patient_hpo:
+        if len(patient_full)>len(patient_ids):
+            _prog(0, len(variants), f"{len(patient_ids)} términos HPO (expandidos a {len(patient_full)})")
+        else:
+            _prog(0, len(variants), f"{len(patient_ids)} términos HPO directos (sin expansión)")
 
     cons_cache={}
     pheno_cache={}
@@ -1998,6 +2007,7 @@ def main():
     ap.add_argument("--father", default=None, help="Father VCF for trio analysis (de novo detection → ACMG PS2)")
     ap.add_argument("--mother", default=None, help="Mother VCF for trio analysis (de novo detection → ACMG PS2)")
     ap.add_argument("--anthropic-key", default=None, help="Anthropic API key (else uses ANTHROPIC_API_KEY env)")
+    ap.add_argument("--expand-hpo", action="store_true", help="Also match on HPO ancestor terms (opt-in; by default only the directly observed terms are used)")
     a=ap.parse_args()
 
     hpo_arg=a.hpo
@@ -2009,7 +2019,8 @@ def main():
                         assembly=a.assembly, use_esm=a.esm, use_am=a.alphamissense,
                         agentic=a.agentic, reflect_k=a.reflect_k,
                         father_vcf=a.father, mother_vcf=a.mother, email=a.email,
-                        anthropic_key=a.anthropic_key, progress=cli_progress)
+                        anthropic_key=a.anthropic_key, progress=cli_progress,
+                        expand_hpo_terms=a.expand_hpo)
     write_outputs(result, a.out_prefix)
     print(f"[raredx] wrote {a.out_prefix}_annotated.csv and {a.out_prefix}_report.html", file=sys.stderr)
 

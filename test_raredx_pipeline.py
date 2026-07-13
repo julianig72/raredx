@@ -1033,3 +1033,48 @@ def test_prefilter_skips_deep_layers_for_common_variants_and_ranks_candidates(tm
     assert "PM2:" in variants[300]["evidence"]
     # Every service answered, so no availability warnings were raised.
     assert not any("unavailable" in w for w in result["warnings"])
+
+
+def test_hpo_expansion_is_opt_in_not_automatic(tmp_path, monkeypatch):
+    path = write_vcf(
+        tmp_path / "one.vcf",
+        ["1\t200\t.\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/1\n"],
+    )
+    monkeypatch.setattr(rx, "_annotation_workers", lambda: 1)
+    monkeypatch.setattr(rx, "vep", lambda v, assembly: {
+        "most_severe": "missense_variant", "gene": "GENB", "gene_id": "ENSG2",
+        "amino_acids": "V/M", "sift": None, "polyphen": None,
+        "annotation_available": True, "gnomad_af": None})
+    monkeypatch.setattr(rx, "gnomad_af", lambda v, return_status=False: (1e-5, True))
+    monkeypatch.setattr(rx, "gnomad_constraint",
+                        lambda gene, cache: {"pli": None, "loeuf": None, "available": True})
+    monkeypatch.setattr(rx, "clinvar",
+                        lambda v, email, assembly: {"significance": None, "stars": 0,
+                                                    "conditions": [], "available": True})
+
+    expand_calls = []
+
+    def fake_expand(ids, return_status=False):
+        expand_calls.append(set(ids))
+        return (set(ids), True) if return_status else set(ids)
+
+    monkeypatch.setattr(rx, "expand_hpo", fake_expand)
+
+    pheno_seen = {}
+
+    def fake_pheno(gene_id, ids, full, return_status=True):
+        pheno_seen["full"] = set(full)
+        return (0.0, 0, 0, "", "", True)
+
+    monkeypatch.setattr(rx, "gene_pheno_score", fake_pheno)
+
+    # Default: no automatic ancestor expansion — phenotype matching uses direct terms only.
+    rx.run_pipeline(path, sample="REQUESTED", hpo="HP:0001250,HP:0001263", assembly="GRCh38")
+    assert expand_calls == []
+    assert pheno_seen["full"] == {"HP:0001250", "HP:0001263"}
+
+    # Opt-in via expand_hpo_terms triggers the ancestor expansion.
+    expand_calls.clear()
+    rx.run_pipeline(path, sample="REQUESTED", hpo="HP:0001250,HP:0001263",
+                    assembly="GRCh38", expand_hpo_terms=True)
+    assert expand_calls == [{"HP:0001250", "HP:0001263"}]

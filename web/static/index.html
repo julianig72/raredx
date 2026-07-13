@@ -118,8 +118,9 @@ método ortogonal (Sanger) y ser interpretado por un genetista clínico con el c
 
   <label>Términos HPO revisados <span class="h">— desmarca arriba o edita aquí antes de analizar</span></label>
   <input type="text" id="hpo" placeholder="HP:0001250, Epileptic encephalopathy, Infantile spasms">
-  <button type="button" class="extract" id="expandhpo">Expandir y revisar HPO</button>
+  <button type="button" class="extract" id="expandhpo">Expandir HPO (opcional)</button>
   <span class="extract-status" id="expandstatus"></span>
+  <div class="h" style="margin-top:4px">El análisis usa por defecto solo los términos observados. La expansión a la ontología HPO es un paso adicional opcional que amplía la búsqueda de coincidencias.</div>
   <div class="expanded-review" id="expandedreview">
     <b>Perfil HPO expandido que se usará para buscar coincidencias:</b>
     <div id="expandedlist"></div>
@@ -425,10 +426,6 @@ $('go').onclick = async () => {
     showErr('Extrae y revisa los HPO de la nota clínica antes de analizar.');
     return;
   }
-  if ($('hpo').value.trim() && expandedFor !== $('hpo').value.trim()) {
-    showErr('Expande y revisa el perfil HPO antes de analizar.');
-    return;
-  }
   hideErr(); $('results').style.display = 'none';
   $('go').disabled = true; $('prog').style.display = 'block'; setBar(3, 'Subiendo VCF…');
 
@@ -436,7 +433,13 @@ $('go').onclick = async () => {
   fd.append('vcf', file);
   fd.append('sample', $('sample').value || 'SAMPLE');
   fd.append('hpo', $('hpo').value);
-  fd.append('expanded_hpo', expandedHpoTerms.map(term => term.hpo_id).join(','));
+  // HPO ancestor expansion is optional: only send the reviewed expanded profile when the
+  // user explicitly expanded it for the current terms. Otherwise the analysis matches on the
+  // directly observed HPO terms only (no automatic expansion at the start).
+  const hpoVal = $('hpo').value.trim();
+  if (hpoVal && expandedFor === hpoVal && expandedHpoTerms.length) {
+    fd.append('expanded_hpo', expandedHpoTerms.map(term => term.hpo_id).join(','));
+  }
   fd.append('clinical_note', '');
   fd.append('assembly', $('assembly').value);
   fd.append('esm', $('esm').checked);
