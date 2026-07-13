@@ -285,16 +285,21 @@ async def analyze(
     if mother is not None and getattr(mother, "filename", None):
         mother_path = str(outdir / "mother.vcf"); await _stream(mother, mother_path)
 
-    try:
+    def _validate_and_detect():
         rx.parse_vcf(
             vcf_path,sample=sample,allow_empty=False,max_variants=MAX_VARIANTS,called_only=True
         )
-        if assembly=="auto":
-            assembly=rx.detect_vcf_assembly(vcf_path)
+        resolved = rx.detect_vcf_assembly(vcf_path) if assembly=="auto" else assembly
         if father_path:
             rx.parse_vcf(father_path)
         if mother_path:
             rx.parse_vcf(mother_path)
+        return resolved
+
+    try:
+        # Parsing a large VCF is blocking + CPU-bound; run it off the event loop so
+        # status polling, /api/jobs and static assets stay responsive meanwhile.
+        assembly = await asyncio.to_thread(_validate_and_detect)
     except (OSError,rx.VCFParseError) as e:
         shutil.rmtree(outdir,ignore_errors=True)
         raise HTTPException(400,str(e))

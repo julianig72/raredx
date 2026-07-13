@@ -1682,6 +1682,7 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
 
     _reset_llm_state()
     _check_cancelled()
+    _prog(0, 0, "Leyendo y filtrando VCF…")
     if assembly in (None,"auto","AUTO"):
         assembly=detect_vcf_assembly(vcf_path)
     variants=parse_vcf(
