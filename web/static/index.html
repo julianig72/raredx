@@ -74,6 +74,7 @@
   .btns a.csv{background:#eef1f5;color:#34495e}
   .err{display:none;background:#fdf2f2;border:1px solid #f5c6cb;border-left:4px solid #c0392b;border-radius:8px;padding:12px 16px;color:#c0392b;font-size:13px;margin-top:14px}
   .path{color:#c0392b;font-weight:700}
+.acmgchip{display:inline-block;border-radius:3px;padding:1px 5px;font-size:10px;font-weight:600;margin:1px;white-space:nowrap}
   .dx{border-left:4px solid #7f8c8d;border-radius:8px;background:#fafbfc;padding:12px 16px;margin:9px 0}
   .dx.high{border-color:#c0392b} .dx.moderate{border-color:#e67e22} .dx.low{border-color:#7f8c8d}
   .dx h3{margin:0;font-size:14.5px}
@@ -184,7 +185,7 @@ método ortogonal (Sanger) y ser interpretado por un genetista clínico con el c
     </div>
     <h2 style="margin:0 0 4px;font-size:16px">Candidatos priorizados <span id="nvar" style="color:#95a5a6;font-weight:400;font-size:13px"></span></h2>
     <table id="toptable"><thead><tr>
-      <th>#</th><th>Gen</th><th>Consecuencia</th><th>Proteína</th><th>gnomAD</th><th>ClinVar</th><th>AlphaM.</th><th>Clasificación</th><th>Encaje HPO</th><th>Score</th>
+      <th>#</th><th>Gen</th><th>Consecuencia</th><th>Proteína</th><th>gnomAD</th><th>ClinVar</th><th>AlphaM.</th><th>Clasificación</th><th>Criterios ACMG</th><th>Encaje HPO</th><th>Score</th>
     </tr></thead><tbody id="topbody"></tbody></table>
     <hr style="border:0;border-top:1px solid #eef1f5;margin:22px 0 4px">
   </div>
@@ -206,6 +207,19 @@ const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => (
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
 ));
+// Render ACMG-lite criterion codes as colored chips (pathogenic red / benign green /
+// conflict-or-missing gray). Full per-criterion evidence lives in the embedded report.
+const ACMG_BENIGN = new Set(['BA1','BS1','BS_ClinVar','BP4','BP4_ESM','BP4_AM','BP6_ClinVar']);
+const ACMG_NEUTRAL = new Set(['ClinVar_conflicting','gnomAD_unavailable']);
+const acmgChips = tags => {
+  if (!tags) return '—';
+  return String(tags).split(',').map(s => s.trim()).filter(Boolean).map(code => {
+    let bg = '#fdecea', fg = '#c0392b', tip = 'patogénico';
+    if (ACMG_BENIGN.has(code)) { bg = '#eafaf1'; fg = '#1e8449'; tip = 'benigno'; }
+    else if (ACMG_NEUTRAL.has(code)) { bg = '#f4f6f7'; fg = '#7f8c8d'; tip = 'conflicto / sin dato'; }
+    return `<span class="acmgchip" style="background:${bg};color:${fg}" title="${tip}">${esc(code)}</span>`;
+  }).join(' ');
+};
 const safeUrl = value => {
   try {
     const url = new URL(String(value), window.location.origin);
@@ -565,6 +579,7 @@ function done(job, s){
     tr.innerHTML = `<td>${esc(v.rank)}</td><td><b>${esc(v.gene || '—')}</b></td><td>${esc((v.consequence||'').replace(/_/g,' '))}</td>
       <td>${esc(v.protein || '—')}</td><td>${esc(af)}</td><td>${esc(v.clinvar || '—')}</td>
       <td>${esc(am)}</td><td class="${path?'path':''}">${esc((v.call||'').split(' |')[0])}</td>
+      <td>${acmgChips(v.acmg_tags)}</td>
       <td><b>${esc(v.pheno_score == null ? '—' : Number(v.pheno_score).toFixed(3))}</b><br>
       <span style="font-size:11px">${esc(v.pheno_disease || 'sin enfermedad coincidente')}</span><br>
       <span style="font-size:10px;color:#7f8c8d">${esc(v.pheno_shared || 'sin HPO compartidos')}</span></td>

@@ -956,6 +956,36 @@ def test_html_report_distinguishes_unavailable_frequency(tmp_path):
     assert "no disponible" in report
 
 
+def test_html_report_renders_acmg_criteria_detail(tmp_path):
+    variant = {
+        "rank": 1, "gene": "SCN1A", "chrom": "2", "pos": 100, "ref": "A", "alt": "G",
+        "af": None, "clinvar": "Pathogenic", "stars": 3,
+        "call": "Pathogenic", "variant_score": 0.95, "pheno_score": 0.4, "combined": 0.7,
+        "filter": "PASS", "acmg_tags": "PM2,PP3_AM,PS_ClinVar",
+        "acmg_detail": [
+            {"code": "PM2", "text": "absent from gnomAD r4"},
+            {"code": "PP3_AM", "text": "AlphaMissense 0.98 (likely_pathogenic)"},
+            {"code": "PS_ClinVar", "text": "ClinVar Pathogenic (3 stars)"},
+            {"code": "weird<b>", "text": "note <script>alert(1)</script>"},
+        ],
+    }
+    prefix = str(tmp_path / "result")
+    rx.write_html([variant], [], prefix)
+    report = Path(prefix + "_report.html").read_text(encoding="utf-8")
+
+    # the collapsible ACMG section, the criterion codes, and their evidence text all render
+    assert "Criterios ACMG" in report
+    assert "PM2" in report and "PP3_AM" in report and "PS_ClinVar" in report
+    assert "absent from gnomAD r4" in report
+    assert "AlphaMissense 0.98 (likely_pathogenic)" in report
+    # plain-language meaning + strength from ACMG_META
+    assert "Ausente o muy rara en gnomAD" in report
+    assert "Muy fuerte" in report or "Fuerte" in report
+    # per-criterion detail is HTML-escaped (no raw injection from evidence/codes)
+    assert "<script>alert(1)</script>" not in report
+    assert "&lt;script&gt;" in report
+
+
 def test_map_concurrent_preserves_order_and_propagates_errors():
     assert rx._map_concurrent([1, 2, 3, 4], lambda x: x * x, 3) == [1, 4, 9, 16]
     # serial fallback (single worker) still preserves order

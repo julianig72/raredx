@@ -1576,6 +1576,30 @@ def _differential_html(agentic):
     )
     return f'<div style="margin:16px 0">{heading}{meta}{"".join(cards)}{ref_html}</div>'
 
+ACMG_META = {
+    # code: (direction P=patogénico / B=benigno / N=neutro, strength label, plain-language meaning)
+    "PVS1": ("P", "Muy fuerte", "Variante nula (LoF) en gen con mecanismo de pérdida de función"),
+    "PVS1_mod": ("P", "Fuerte", "LoF con soporte de mecanismo/constricción moderado"),
+    "LoF_predicted": ("P", "Moderada", "Consecuencia LoF predicha (requiere confirmar mecanismo, transcrito y NMD)"),
+    "PS_ClinVar": ("P", "Fuerte", "ClinVar patogénica con revisión de ≥2 estrellas"),
+    "PS2": ("P", "Fuerte", "De novo confirmada (ausente en ambos progenitores genotipados)"),
+    "PM2": ("P", "Moderada", "Ausente o muy rara en gnomAD"),
+    "PP3": ("P", "Apoyo", "Predictores in silico (SIFT/PolyPhen) deletéreos"),
+    "PP3_ESM": ("P", "Apoyo", "ESM-2 predice un efecto deletéreo"),
+    "PP3_AM": ("P", "Apoyo", "AlphaMissense clasifica como probablemente patogénica"),
+    "PP5_ClinVar": ("P", "Apoyo", "ClinVar patogénica con baja revisión (<2 estrellas)"),
+    "BA1": ("B", "Autónoma", "Frecuencia poblacional ≥5% (benigna por sí sola)"),
+    "BS1": ("B", "Fuerte", "Frecuencia poblacional ≥1%, superior a la esperada para la enfermedad"),
+    "BS_ClinVar": ("B", "Fuerte", "ClinVar benigna con revisión de ≥2 estrellas"),
+    "BP4": ("B", "Apoyo", "Predictores in silico (SIFT/PolyPhen) toleran la variante"),
+    "BP4_ESM": ("B", "Apoyo", "ESM-2 predice un efecto tolerado"),
+    "BP4_AM": ("B", "Apoyo", "AlphaMissense clasifica como probablemente benigna"),
+    "BP6_ClinVar": ("B", "Apoyo", "ClinVar benigna con baja revisión (<2 estrellas)"),
+    "ClinVar_conflicting": ("N", "Conflicto", "ClinVar con interpretaciones en conflicto"),
+    "gnomAD_unavailable": ("N", "Sin dato", "No se pudo consultar gnomAD; la ausencia no se evaluó"),
+}
+
+
 def write_html(variants, patient_hpo, prefix, assembly="GRCh38", agentic=None, warnings=None):
     TC={"Pathogenic":"#c0392b","Likely pathogenic":"#e67e22","Uncertain significance (VUS)":"#7f8c8d",
         "Likely benign":"#27ae60","Benign":"#2ecc71"}
@@ -1624,14 +1648,44 @@ def write_html(variants, patient_hpo, prefix, assembly="GRCh38", agentic=None, w
         color="#c0392b" if inh=="de_novo" else ("#16a085" if inh=="homozygous_recessive" else "#34495e")
         wt=";font-weight:700" if inh=="de_novo" else ""
         return f'<td style="color:{color}{wt}">{INH_LABEL.get(inh,inh)}</td>'
-    rows="".join(f'<tr><td>{v["rank"]}</td><td><b>{html.escape(v.get("gene") or "")}</b></td>'
-                 f'<td>{html.escape(str(v["chrom"]))}:{v["pos"]} {html.escape(v["ref"])}>{html.escape(v["alt"])}</td>'
-                 f'<td>{faf(v)}</td><td>{html.escape(str(v.get("clinvar") or ""))} {"*"*int(v.get("stars") or 0)}</td>'
-                 f'<td>{ai_cell(v)}</td>'
-                 f'<td style="color:{col(v["call"])};font-weight:600">{html.escape(tier(v["call"]))}</td>'
-                 + (inh_cell(v) if has_trio else "")
-                 + f'<td>{v.get("variant_score",0):.2f}</td>{pheno_cell(v)}'
-                 f'<td><b>{v.get("combined",0):.2f}</b></td><td>{html.escape(str(v.get("filter") or ""))}</td></tr>' for v in variants)
+    def acmg_detail_row(v, ncols):
+        detail=v.get("acmg_detail") or []
+        if not detail:
+            inner=('<div class="acmg-empty">Sin criterios ACMG asignados '
+                   '(revisar cobertura de anotación de esta variante).</div>')
+        else:
+            items=[]
+            for it in detail:
+                code=str(it.get("code") or "")
+                text=str(it.get("text") or "")
+                direction,strength,meaning=ACMG_META.get(code,("N","",code))
+                bg={"P":"#fdecea","B":"#eafaf1","N":"#f4f6f7"}[direction]
+                fg={"P":"#c0392b","B":"#1e8449","N":"#7f8c8d"}[direction]
+                items.append(
+                    f'<div class="acmg-item" style="background:{bg};border-left:3px solid {fg}">'
+                    f'<div class="acmg-head"><span class="acmg-code" style="color:{fg}">{html.escape(code)}</span>'
+                    f'<span class="acmg-strength">{html.escape(strength)}</span></div>'
+                    f'<div class="acmg-meaning">{html.escape(meaning)}</div>'
+                    f'<div class="acmg-ev">{html.escape(text)}</div></div>'
+                )
+            inner='<div class="acmg-grid">'+"".join(items)+'</div>'
+        codes=html.escape(v.get("acmg_tags") or "—")
+        return (f'<tr class="acmg-row"><td colspan="{ncols}"><details><summary>'
+                f'Criterios ACMG · <b style="color:{col(v["call"])}">{html.escape(tier(v["call"]))}</b> '
+                f'<span class="acmg-summary-codes">({len(detail)}: {codes})</span></summary>'
+                f'<div class="acmg-full">Clasificación completa: {html.escape(v.get("call") or "")}</div>'
+                f'{inner}</details></td></tr>')
+    ncols=12 if has_trio else 11
+    def main_row(v):
+        return (f'<tr><td>{v["rank"]}</td><td><b>{html.escape(v.get("gene") or "")}</b></td>'
+                f'<td>{html.escape(str(v["chrom"]))}:{v["pos"]} {html.escape(v["ref"])}>{html.escape(v["alt"])}</td>'
+                f'<td>{faf(v)}</td><td>{html.escape(str(v.get("clinvar") or ""))} {"*"*int(v.get("stars") or 0)}</td>'
+                f'<td>{ai_cell(v)}</td>'
+                f'<td style="color:{col(v["call"])};font-weight:600">{html.escape(tier(v["call"]))}</td>'
+                + (inh_cell(v) if has_trio else "")
+                + f'<td>{v.get("variant_score",0):.2f}</td>{pheno_cell(v)}'
+                f'<td><b>{v.get("combined",0):.2f}</b></td><td>{html.escape(str(v.get("filter") or ""))}</td></tr>')
+    rows="".join(main_row(v)+acmg_detail_row(v,ncols) for v in variants)
     inh_th="<th>Herencia</th>" if has_trio else ""
     now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     doc=f"""<!doctype html><html lang="es"><head><meta charset="utf-8"><title>raredx report</title>
@@ -1641,16 +1695,33 @@ header{{background:#1e2a38;color:#fff;padding:20px 28px;border-radius:10px}} h1{
 .hpo code{{color:#8e44ad;font-size:10px}} .hpobar{{background:#fff;border-radius:10px;padding:12px 16px;margin:14px 0}}
 table{{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;font-size:12.5px}}
 th{{background:#eef1f5;text-align:left;padding:8px;font-size:10.5px;text-transform:uppercase;color:#7f8c8d}}
-td{{padding:7px 8px;border-top:1px solid #eef1f5}} .note{{background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:12px 16px;font-size:12px;color:#795548;margin-top:20px}}</style></head><body>
+td{{padding:7px 8px;border-top:1px solid #eef1f5}} .note{{background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:12px 16px;font-size:12px;color:#795548;margin-top:20px}}
+tr.acmg-row td{{padding:0 8px 8px;border-top:none}}
+tr.acmg-row details{{margin:0 0 4px}} tr.acmg-row summary{{cursor:pointer;font-size:11.5px;color:#34495e;padding:5px 0;list-style:none}}
+tr.acmg-row summary::-webkit-details-marker{{display:none}} tr.acmg-row summary::before{{content:"\\25B8 ";color:#95a5a6}}
+tr.acmg-row details[open] summary::before{{content:"\\25BE "}}
+.acmg-summary-codes{{color:#95a5a6;font-weight:400;font-size:10.5px}}
+.acmg-full{{font-size:11px;color:#7f8c8d;margin:2px 0 8px}}
+.acmg-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px;margin-bottom:6px}}
+.acmg-item{{border-radius:6px;padding:7px 9px;font-size:11px}}
+.acmg-head{{display:flex;justify-content:space-between;align-items:baseline;gap:6px}}
+.acmg-code{{font-weight:700;font-size:12px}} .acmg-strength{{font-size:9.5px;text-transform:uppercase;letter-spacing:.3px;color:#7f8c8d}}
+.acmg-meaning{{color:#2c3e50;margin:3px 0 2px}} .acmg-ev{{color:#5d6d7e;font-size:10px}}
+.acmg-empty{{font-size:11px;color:#95a5a6;padding:4px 0}}
+.legend{{font-size:11px;color:#566573;margin:6px 0 2px}} .legend b{{border-radius:3px;padding:1px 6px}}</style></head><body>
 <header><h1>raredx - Informe genomico priorizado por fenotipo</h1>
 <div style="color:#9fb3c8;font-size:12px">{assembly} | {len(variants)} variantes | {now}</div></header>
 <div class="hpobar"><b>Perfil HPO del paciente ({len(patient_hpo)}):</b><br>{chips or "(ninguno - solo ranking por variante)"}</div>
 {warning_html}
 {_differential_html(agentic)}
 <h2 style="font-size:14px;color:#1e2a38;margin:18px 0 4px">Variantes candidatas priorizadas</h2>
+<div class="legend">Despliega <b style="background:#eef1f5;color:#34495e">Criterios ACMG</b> bajo cada variante para ver el detalle. Codigo de color:
+<b style="background:#fdecea;color:#c0392b">patogenico</b>
+<b style="background:#eafaf1;color:#1e8449">benigno</b>
+<b style="background:#f4f6f7;color:#7f8c8d">conflicto/sin dato</b></div>
 <table><thead><tr><th>#</th><th>Gen</th><th>Variante</th><th>gnomAD</th><th>ClinVar</th><th>IA</th><th>Clase</th>{inh_th}<th>Var</th><th>Encaje HPO</th><th>Comb</th><th>QC</th></tr></thead>
 <tbody>{rows}</tbody></table>
-<div class="note"><b>Sistema de apoyo a la decision, no diagnostico.</b> VEP + gnomAD + ClinVar (score de variante ACMG-lite) x fenotipos HPO de Open Targets (score fenotipico). Confirmar por metodo ortogonal e interpretar en contexto clinico.</div>
+<div class="note"><b>Sistema de apoyo a la decision, no diagnostico.</b> VEP + gnomAD + ClinVar (score de variante ACMG-lite, criterios detallados por variante) x fenotipos HPO de Open Targets (score fenotipico). Los criterios ACMG mostrados son una implementacion simplificada (ACMG-lite) y no sustituyen la curacion manual. Confirmar por metodo ortogonal e interpretar en contexto clinico.</div>
 </body></html>"""
     with open(f"{prefix}_report.html","w",encoding="utf-8") as fh:
         fh.write(doc)
@@ -1954,6 +2025,7 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
         tags=v.pop("_tags")
         v["acmg_tags"]=",".join(t[0] for t in tags)
         v["evidence"]="; ".join(f"{t[0]}: {t[1]}" for t in tags)
+        v["acmg_detail"]=[{"code":t[0],"text":t[1]} for t in tags]
         v["variant_score"]=_variant_evidence_score(tags,v["call"])
         c=0.55*v["variant_score"]+0.45*v["pheno_score"] if patient_ids else v["variant_score"]
         if v["filter"]!="PASS": c*=0.5
