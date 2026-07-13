@@ -101,6 +101,34 @@ def _cleanup_jobs():
             continue
 
 
+JOB_ID_RE = re.compile(r"^[0-9a-fA-F]{6,32}$")
+
+
+def _job_dir(job_id):
+    """Resolve a job's on-disk directory, guarding against path traversal."""
+    if not JOB_ID_RE.match(job_id or ""):
+        return None
+    root=DATA_DIR.resolve()
+    candidate=(root / job_id).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_dir() else None
+
+
+def _job_file(job_id, in_memory_path, disk_name):
+    """Return an existing result file: prefer the in-memory path, fall back to disk."""
+    if in_memory_path and os.path.exists(in_memory_path):
+        return in_memory_path
+    directory=_job_dir(job_id)
+    if directory is not None:
+        candidate=directory / disk_name
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 def _run_job(job_id, vcf_path, sample, hpo, note, assembly, use_esm, use_am, use_agentic, reflect_k,
              father_vcf=None, mother_vcf=None, expanded_hpo=None, cancel_event=None):
     outdir = DATA_DIR / job_id
@@ -356,21 +384,60 @@ def status(job_id: str):
         "has_report": bool(j.get("report")), "has_csv": bool(j.get("csv")),
     })
 
+@app.get("/api/jobs")
+def jobs():
+    """List persisted analyses (newest first) so past results stay reachable in-app."""
+    with JOBS_LOCK:
+        mem={jid:{"n_variants":j.get("n_variants"),"sample":j.get("sample"),
+                  "assembly":j.get("assembly"),"status":j.get("status")}
+             for jid,j in JOBS.items()}
+    out=[]
+    for directory in DATA_DIR.iterdir():
+        if not directory.is_dir() or not JOB_ID_RE.match(directory.name):
+            continue
+        report_path=directory / "result_report.html"
+        if not report_path.exists():
+            continue
+        csv_path=directory / "result_annotated.csv"
+        info=mem.get(directory.name,{})
+        n_variants=info.get("n_variants")
+        if n_variants is None and csv_path.exists():
+            try:
+                import csv as _csv
+                with open(csv_path,encoding="utf-8",newline="") as fh:
+                    n_variants=max(0,sum(1 for _ in _csv.reader(fh))-1)
+            except OSError:
+                n_variants=None
+        out.append({
+            "job_id":directory.name,
+            "modified":report_path.stat().st_mtime,
+            "n_variants":n_variants,
+            "sample":info.get("sample"),
+            "assembly":info.get("assembly"),
+            "status":info.get("status") or "done",
+            "has_csv":csv_path.exists(),
+        })
+    out.sort(key=lambda item:item["modified"],reverse=True)
+    return {"jobs":out[:50]}
+
+
 @app.get("/api/report/{job_id}")
 def report(job_id: str):
     with JOBS_LOCK:
         j = JOBS.get(job_id)
-    if not j or not j.get("report") or not os.path.exists(j["report"]):
+    path=_job_file(job_id,(j or {}).get("report"),"result_report.html")
+    if not path:
         raise HTTPException(404, "report not ready")
-    return FileResponse(j["report"], media_type="text/html")
+    return FileResponse(path, media_type="text/html")
 
 @app.get("/api/csv/{job_id}")
 def csv(job_id: str):
     with JOBS_LOCK:
         j = JOBS.get(job_id)
-    if not j or not j.get("csv") or not os.path.exists(j["csv"]):
+    path=_job_file(job_id,(j or {}).get("csv"),"result_annotated.csv")
+    if not path:
         raise HTTPException(404, "csv not ready")
-    return FileResponse(j["csv"], media_type="text/csv",
+    return FileResponse(path, media_type="text/csv",
                         filename=f"raredx_{job_id}_candidates.csv")
 
 # serve the static SPA (index.html + assets) at /

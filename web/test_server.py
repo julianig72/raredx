@@ -225,6 +225,64 @@ def test_full_analysis_alphamissense():
     assert "AlphaMissense" in client.get(f"/api/report/{job}").text
 
 
+def _make_disk_job(job_id, rows=3):
+    """Create a persisted job dir on disk WITHOUT registering it in JOBS."""
+    d = server.DATA_DIR / job_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "result_report.html").write_text(
+        "<html><body>informe " + job_id + "</body></html>", encoding="utf-8")
+    header = "gene,consequence,call\n"
+    body = "".join(f"GENE{i},missense,VUS\n" for i in range(rows))
+    (d / "result_annotated.csv").write_text(header + body, encoding="utf-8")
+    return d
+
+
+def test_report_and_csv_served_from_disk_when_not_in_memory():
+    job_id = "deadbeef0001"
+    d = _make_disk_job(job_id, rows=5)
+    try:
+        with server.JOBS_LOCK:
+            assert job_id not in server.JOBS  # purely disk-backed
+        rep = client.get(f"/api/report/{job_id}")
+        assert rep.status_code == 200
+        assert "informe " + job_id in rep.text
+        csv = client.get(f"/api/csv/{job_id}")
+        assert csv.status_code == 200
+        assert "GENE0" in csv.text
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_jobs_lists_persisted_analyses_newest_first():
+    a, b = "aaaaaaaa0001", "bbbbbbbb0002"
+    da = _make_disk_job(a, rows=4)
+    db = _make_disk_job(b, rows=7)
+    # make b clearly newer than a
+    os.utime(da / "result_report.html", (time.time() - 100, time.time() - 100))
+    os.utime(db / "result_report.html", (time.time(), time.time()))
+    try:
+        payload = client.get("/api/jobs").json()["jobs"]
+        ids = [j["job_id"] for j in payload]
+        assert a in ids and b in ids
+        assert ids.index(b) < ids.index(a)  # newest first
+        by_id = {j["job_id"]: j for j in payload}
+        assert by_id[a]["n_variants"] == 4
+        assert by_id[b]["n_variants"] == 7
+        assert by_id[b]["has_csv"] is True
+    finally:
+        import shutil
+        shutil.rmtree(da, ignore_errors=True)
+        shutil.rmtree(db, ignore_errors=True)
+
+
+def test_report_rejects_invalid_job_id():
+    # non-hex id: fails the JOB_ID_RE guard and is absent from JOBS -> 404
+    assert client.get("/api/report/not-a-valid-id").status_code == 404
+    # well-formed but non-existent id -> 404 (no disk dir)
+    assert client.get("/api/report/ffffffff9999").status_code == 404
+
+
 if __name__ == "__main__":
     # runnable without pytest: quick smoke
     test_static_index_served(); print("static index: OK")

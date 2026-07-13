@@ -54,6 +54,17 @@
   .pmeta b{color:#5d6d7e;font-weight:600}
   .psources{white-space:normal}
   .results{display:none}
+  #repframe{width:100%;height:72vh;border:1px solid #e5e9f0;border-radius:8px;background:#fff;margin-top:10px}
+  .recenthead,.rephead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  #recentlist{margin-top:12px;display:flex;flex-direction:column;gap:6px}
+  .jobrow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;border:1px solid #e9edf2;border-radius:8px;background:#fbfcfe;cursor:pointer}
+  .jobrow:hover{border-color:#b9c9e8;background:#f2f6fd}
+  .jobrow.active{border-color:#6c8ef5;background:#eef3fe}
+  .jobrow .jmeta{font-size:12px;color:#7f8c8d;margin-top:2px}
+  .jobrow .jid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#95a5a6}
+  .jobrow .jopen{font-size:12px;color:#3b6fe0;font-weight:600;white-space:nowrap}
+  .linkbtn{background:none;border:0;color:#3b6fe0;font-size:13px;cursor:pointer;padding:2px 4px}
+  .linkbtn:hover{text-decoration:underline}
   table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px}
   th{background:#eef1f5;text-align:left;padding:7px;font-size:9.5px;text-transform:uppercase;color:#7f8c8d}
   td{padding:6px 7px;border-top:1px solid #eef1f5}
@@ -154,21 +165,36 @@ método ortogonal (Sanger) y ser interpretado por un genetista clínico con el c
   <div class="err" id="err"></div>
 </div>
 
+<div class="card recent" id="recent" style="display:none">
+  <div class="recenthead">
+    <h2 style="margin:0;font-size:16px">Análisis recientes</h2>
+    <button type="button" id="recentrefresh" class="linkbtn">Actualizar</button>
+  </div>
+  <div id="recentlist"></div>
+</div>
+
 <div class="card results" id="results">
-  <div class="disc" id="warnings" style="display:none"></div>
-  <div id="diffwrap" style="display:none">
-    <h2 style="margin:0 0 8px;font-size:16px">🧬 Diagnóstico diferencial <span style="color:#95a5a6;font-weight:400;font-size:12px">— razonamiento agéntico</span></h2>
-    <div id="diffbody"></div>
-    <hr style="border:0;border-top:1px solid #eef1f5;margin:18px 0">
+  <div id="livesummary">
+    <div class="disc" id="warnings" style="display:none"></div>
+    <div id="diffwrap" style="display:none">
+      <h2 style="margin:0 0 8px;font-size:16px">🧬 Diagnóstico diferencial <span style="color:#95a5a6;font-weight:400;font-size:12px">— razonamiento agéntico</span></h2>
+      <div id="diffbody"></div>
+      <hr style="border:0;border-top:1px solid #eef1f5;margin:18px 0">
+    </div>
+    <h2 style="margin:0 0 4px;font-size:16px">Candidatos priorizados <span id="nvar" style="color:#95a5a6;font-weight:400;font-size:13px"></span></h2>
+    <table id="toptable"><thead><tr>
+      <th>#</th><th>Gen</th><th>Consecuencia</th><th>Proteína</th><th>gnomAD</th><th>ClinVar</th><th>AlphaM.</th><th>Clasificación</th><th>Encaje HPO</th><th>Score</th>
+    </tr></thead><tbody id="topbody"></tbody></table>
+    <hr style="border:0;border-top:1px solid #eef1f5;margin:22px 0 4px">
   </div>
-  <h2 style="margin:0 0 4px;font-size:16px">Candidatos priorizados <span id="nvar" style="color:#95a5a6;font-weight:400;font-size:13px"></span></h2>
-  <div class="btns">
-    <a class="rep" id="repbtn" target="_blank">Ver informe completo</a>
-    <a class="csv" id="csvbtn">Descargar CSV</a>
+  <div class="rephead">
+    <h2 style="margin:0 0 4px;font-size:16px">Informe completo <span id="repmeta" style="color:#95a5a6;font-weight:400;font-size:13px"></span></h2>
+    <div class="btns" style="margin:8px 0">
+      <a class="rep" id="repbtn" target="_blank" rel="noopener noreferrer">Abrir en pestaña nueva ↗</a>
+      <a class="csv" id="csvbtn">Descargar CSV</a>
+    </div>
   </div>
-  <table id="toptable"><thead><tr>
-    <th>#</th><th>Gen</th><th>Consecuencia</th><th>Proteína</th><th>gnomAD</th><th>ClinVar</th><th>AlphaM.</th><th>Clasificación</th><th>Encaje HPO</th><th>Score</th>
-  </tr></thead><tbody id="topbody"></tbody></table>
+  <iframe id="repframe" title="Informe del análisis"></iframe>
 </div>
 
 <footer>raredx · Ensembl VEP · gnomAD · ClinVar · Open Targets · ESM-2 · AlphaMissense · HPO</footer>
@@ -190,6 +216,8 @@ const safeUrl = value => {
 $('agentic').addEventListener('change', e => {
   $('reflectkwrap').style.display = e.target.checked ? 'block' : 'none';
 });
+$('recentrefresh').onclick = () => loadRecent();
+window.addEventListener('DOMContentLoaded', () => loadRecent());
 let file = null;
 let extractedNote = '';
 let extractedHpoIds = new Set();
@@ -197,6 +225,7 @@ let expandedHpoTerms = [];
 let expandedFor = '';
 let removedExpandedHpoIds = new Set();
 let activeJob = null;
+let shownJob = null;
 
 const drop = $('drop');
 drop.onclick = () => $('vcf').click();
@@ -482,8 +511,12 @@ function done(job, s){
   $('go').disabled = false;
   $('cancel').style.display = 'none';
   activeJob = null;
+  shownJob = job;
+  $('livesummary').style.display = '';
+  $('repmeta').textContent = '· análisis actual';
   $('repbtn').href = '/api/report/' + job;
   $('csvbtn').href = '/api/csv/' + job;
+  $('repframe').src = '/api/report/' + job;
   const providers = s.llm_providers || [];
   $('nvar').textContent = '· ' + s.n_variants + ' variantes analizadas'
     + (providers.length ? ' · LLM: ' + providers.join(', ') : '');
@@ -536,9 +569,49 @@ function done(job, s){
     tb.appendChild(tr);
   });
   $('results').style.display = 'block';
+  loadRecent();
 }
 
-function setBar(p, m){ $('barfill').style.width = p + '%'; $('pmsg').textContent = m; }
+async function loadRecent(){
+  try {
+    const r = await fetch('/api/jobs');
+    if (!r.ok) return;
+    const data = await r.json();
+    const jobs = data.jobs || [];
+    const box = $('recentlist');
+    if (!jobs.length) { $('recent').style.display = 'none'; return; }
+    box.innerHTML = '';
+    jobs.forEach(j => {
+      const row = document.createElement('div');
+      row.className = 'jobrow' + (j.job_id === shownJob ? ' active' : '');
+      row.dataset.job = j.job_id;
+      const when = new Date(j.modified * 1000).toLocaleString();
+      const nv = (j.n_variants == null) ? '' : `${j.n_variants} variantes · `;
+      const smp = j.sample ? `${esc(j.sample)} · ` : '';
+      const asm = j.assembly ? `${esc(j.assembly)} · ` : '';
+      row.innerHTML =
+        `<div><div><b>${esc(when)}</b></div>
+         <div class="jmeta">${smp}${asm}${nv}<span class="jid">${esc(j.job_id)}</span></div></div>
+         <div class="jopen">Ver informe →</div>`;
+      row.onclick = () => viewJob(j.job_id);
+      box.appendChild(row);
+    });
+    $('recent').style.display = 'block';
+  } catch (e) { /* silencioso */ }
+}
+
+function viewJob(jobId){
+  shownJob = jobId;
+  $('livesummary').style.display = 'none';
+  $('repmeta').textContent = '· análisis ' + jobId;
+  $('repframe').src = '/api/report/' + encodeURIComponent(jobId);
+  $('repbtn').href = '/api/report/' + encodeURIComponent(jobId);
+  $('csvbtn').href = '/api/csv/' + encodeURIComponent(jobId);
+  $('results').style.display = 'block';
+  document.querySelectorAll('.jobrow').forEach(el =>
+    el.classList.toggle('active', el.dataset.job === jobId));
+  $('results').scrollIntoView({behavior:'smooth', block:'start'});
+}
 function formatDuration(seconds) {
   if (seconds == null || !Number.isFinite(Number(seconds))) return 'calculando…';
   let remaining = Math.max(0, Math.round(Number(seconds)));
