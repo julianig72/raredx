@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 env/
 out/
+patient_sessions/
 *.log
 .DS_Store
 handoff/

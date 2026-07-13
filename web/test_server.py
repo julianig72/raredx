@@ -3,10 +3,11 @@
 These hit live REST APIs (Ensembl/gnomAD/ClinVar), so they need network access and take
 ~10-30 s. Run from the repo root:  python -m pytest web/test_server.py -v
 """
-import os, sys, threading, time
+import os, sys, threading, time, json
 from pathlib import Path
 
 os.environ.setdefault("RAREDX_DATA_DIR", "/tmp")
+os.environ.setdefault("RAREDX_SESSIONS_DIR", "/tmp/raredx_sessions_test")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
@@ -31,7 +32,7 @@ def test_static_index_served():
     assert "Analizar VCF" in r.text  # the upload UI
     assert "Extraer HPO con Copilot" in r.text
     assert "Ensamblaje del genoma" in r.text
-    assert "Expandir y revisar HPO" in r.text
+    assert "Expandir HPO (opcional)" in r.text
     assert "Detener análisis" in r.text
 
 
@@ -237,6 +238,22 @@ def _make_disk_job(job_id, rows=3):
     return d
 
 
+def _make_session_dir(job_id, rows=3, sample="S", assembly="GRCh37", created_ts=None):
+    """Create a persisted patient session in SESSIONS_DIR with a metadata.json sidecar."""
+    d = server.SESSIONS_DIR / job_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "result_report.html").write_text(
+        "<html><body>informe " + job_id + "</body></html>", encoding="utf-8")
+    header = "gene,consequence,call\n"
+    body = "".join(f"GENE{i},missense,VUS\n" for i in range(rows))
+    (d / "result_annotated.csv").write_text(header + body, encoding="utf-8")
+    meta = {"job_id": job_id, "sample": sample, "assembly": assembly, "n_variants": rows}
+    if created_ts is not None:
+        meta["created_ts"] = created_ts
+    (d / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+    return d
+
+
 def test_report_and_csv_served_from_disk_when_not_in_memory():
     job_id = "deadbeef0001"
     d = _make_disk_job(job_id, rows=5)
@@ -256,11 +273,8 @@ def test_report_and_csv_served_from_disk_when_not_in_memory():
 
 def test_jobs_lists_persisted_analyses_newest_first():
     a, b = "aaaaaaaa0001", "bbbbbbbb0002"
-    da = _make_disk_job(a, rows=4)
-    db = _make_disk_job(b, rows=7)
-    # make b clearly newer than a
-    os.utime(da / "result_report.html", (time.time() - 100, time.time() - 100))
-    os.utime(db / "result_report.html", (time.time(), time.time()))
+    da = _make_session_dir(a, rows=4, created_ts=time.time() - 100)
+    db = _make_session_dir(b, rows=7, created_ts=time.time())
     try:
         payload = client.get("/api/jobs").json()["jobs"]
         ids = [j["job_id"] for j in payload]
@@ -274,6 +288,39 @@ def test_jobs_lists_persisted_analyses_newest_first():
         import shutil
         shutil.rmtree(da, ignore_errors=True)
         shutil.rmtree(db, ignore_errors=True)
+
+
+def test_persisted_session_survives_data_dir_cleanup():
+    """A finished analysis copied to SESSIONS_DIR stays reachable even after its
+    ephemeral DATA_DIR copy is deleted (report, csv, and /api/jobs all resolve it)."""
+    job_id = "cafe12340001"
+    src = server.DATA_DIR / job_id
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "result_report.html").write_text("<html>informe cafe</html>", encoding="utf-8")
+    (src / "result_annotated.csv").write_text("gene,call\nSCN1A,Pathogenic\n", encoding="utf-8")
+    (src / "input.vcf").write_text(MINI_VCF, encoding="utf-8")
+    meta = {"job_id": job_id, "sample": "16-DR636", "n_variants": 2,
+            "created_ts": time.time(), "assembly": "GRCh37", "top_gene": "SCN1A"}
+    import shutil
+    try:
+        server._persist_session(job_id, meta)
+        dest = server.SESSIONS_DIR / job_id
+        assert (dest / "result_report.html").exists()
+        assert (dest / "result_annotated.csv").exists()
+        assert (dest / "input.vcf").exists()  # PHI persisted for re-analysis
+        saved = json.loads((dest / "metadata.json").read_text(encoding="utf-8"))
+        assert saved["n_variants"] == 2 and saved["top_gene"] == "SCN1A"
+        # drop the ephemeral copy and ensure the session store still serves everything
+        shutil.rmtree(src, ignore_errors=True)
+        with server.JOBS_LOCK:
+            assert job_id not in server.JOBS
+        assert client.get(f"/api/report/{job_id}").status_code == 200
+        assert client.get(f"/api/csv/{job_id}").status_code == 200
+        listed = {j["job_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+        assert job_id in listed and listed[job_id]["n_variants"] == 2
+    finally:
+        shutil.rmtree(server.SESSIONS_DIR / job_id, ignore_errors=True)
+        shutil.rmtree(src, ignore_errors=True)
 
 
 def test_report_rejects_invalid_job_id():

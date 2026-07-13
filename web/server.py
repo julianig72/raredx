@@ -19,7 +19,7 @@ SECURITY / DEPLOYMENT NOTES (read before exposing to real clinicians):
   * Uploads are size-capped (RAREDX_MAX_MB, default 50). VCF is parsed, never executed.
   * The tool is DECISION SUPPORT, not a diagnosis (surfaced in the UI and every report).
 """
-import asyncio, os, re, sys, uuid, threading, shutil, tempfile, time, traceback
+import asyncio, datetime, json, os, re, sys, uuid, threading, shutil, tempfile, time, traceback
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -34,6 +34,12 @@ import raredx_pipeline as rx
 
 DATA_DIR = Path(os.environ.get("RAREDX_DATA_DIR", tempfile.gettempdir())) / "raredx_jobs"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+# Persistent patient-session store (repo-local by default). Unlike DATA_DIR this is NEVER
+# TTL-cleaned, so past results stay recoverable. Holds PHI (VCF + report) → kept out of git
+# via .gitignore; point RAREDX_SESSIONS_DIR at an encrypted volume for real clinical use.
+SESSIONS_DIR = Path(os.environ.get(
+    "RAREDX_SESSIONS_DIR", Path(__file__).resolve().parent.parent / "patient_sessions"))
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 MAX_MB = int(os.environ.get("RAREDX_MAX_MB", "50"))
 CONTACT_EMAIL = os.environ.get("RAREDX_EMAIL")  # optional NCBI contact
 MAX_ACTIVE_JOBS = max(1, int(os.environ.get("RAREDX_MAX_ACTIVE_JOBS", "4")))
@@ -117,16 +123,49 @@ def _job_dir(job_id):
     return candidate if candidate.is_dir() else None
 
 
+def _session_dir(job_id):
+    """Resolve a persisted patient-session directory, guarding against path traversal."""
+    if not JOB_ID_RE.match(job_id or ""):
+        return None
+    root=SESSIONS_DIR.resolve()
+    candidate=(root / job_id).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_dir() else None
+
+
 def _job_file(job_id, in_memory_path, disk_name):
-    """Return an existing result file: prefer the in-memory path, fall back to disk."""
+    """Return an existing result file: prefer the in-memory path, then the live job dir,
+    then the persistent session store (which survives DATA_DIR TTL cleanup)."""
     if in_memory_path and os.path.exists(in_memory_path):
         return in_memory_path
-    directory=_job_dir(job_id)
-    if directory is not None:
-        candidate=directory / disk_name
-        if candidate.exists():
-            return str(candidate)
+    for directory in (_job_dir(job_id), _session_dir(job_id)):
+        if directory is not None:
+            candidate=directory / disk_name
+            if candidate.exists():
+                return str(candidate)
     return None
+
+
+def _persist_session(job_id, meta):
+    """Copy a finished analysis into the persistent patient-session store so results stay
+    recoverable after DATA_DIR is TTL-cleaned. Best-effort: never breaks the running job."""
+    if not JOB_ID_RE.match(job_id or ""):
+        return
+    try:
+        dest=SESSIONS_DIR / job_id
+        dest.mkdir(parents=True, exist_ok=True)
+        src=DATA_DIR / job_id
+        for name in ("result_report.html","result_annotated.csv","input.vcf"):
+            source=src / name
+            if source.exists():
+                shutil.copy2(source, dest / name)
+        (dest / "metadata.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _run_job(job_id, vcf_path, sample, hpo, note, assembly, use_esm, use_am, use_agentic, reflect_k,
@@ -170,6 +209,26 @@ def _run_job(job_id, vcf_path, sample, hpo, note, assembly, use_esm, use_am, use
              llm_providers=result.get("llm_providers",[]),
              report=f"{prefix}_report.html", csv=f"{prefix}_annotated.csv",
              finished=time.time(),updated=time.time())
+        ai_layers=[]
+        if use_esm: ai_layers.append("ESM-2")
+        if use_am: ai_layers.append("AlphaMissense")
+        if use_agentic: ai_layers.append("Agentic")
+        if father_vcf or mother_vcf: ai_layers.append("Trio")
+        top_variant = top[0] if top else {}
+        _persist_session(job_id, {
+            "job_id": job_id,
+            "sample": sample or "",
+            "created": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "created_ts": time.time(),
+            "assembly": result.get("assembly") or assembly,
+            "hpo": hpo or "",
+            "expanded_hpo": bool(expanded_hpo),
+            "n_variants": len(variants),
+            "top_gene": top_variant.get("gene"),
+            "top_call": top_variant.get("call"),
+            "ai_layers": ai_layers,
+            "n_warnings": len(result.get("warnings",[])),
+        })
     except rx.AnalysisCancelled:
         shutil.rmtree(outdir,ignore_errors=True)
         _set(job_id,status="cancelled",message="Análisis detenido por el usuario",
@@ -391,21 +450,31 @@ def status(job_id: str):
 
 @app.get("/api/jobs")
 def jobs():
-    """List persisted analyses (newest first) so past results stay reachable in-app."""
+    """List persisted patient sessions (newest first) so past results stay recoverable
+    across restarts and after the ephemeral job dir is TTL-cleaned."""
     with JOBS_LOCK:
         mem={jid:{"n_variants":j.get("n_variants"),"sample":j.get("sample"),
                   "assembly":j.get("assembly"),"status":j.get("status")}
              for jid,j in JOBS.items()}
     out=[]
-    for directory in DATA_DIR.iterdir():
+    for directory in SESSIONS_DIR.iterdir():
         if not directory.is_dir() or not JOB_ID_RE.match(directory.name):
             continue
         report_path=directory / "result_report.html"
         if not report_path.exists():
             continue
         csv_path=directory / "result_annotated.csv"
+        meta={}
+        meta_path=directory / "metadata.json"
+        if meta_path.exists():
+            try:
+                meta=json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError,ValueError):
+                meta={}
         info=mem.get(directory.name,{})
-        n_variants=info.get("n_variants")
+        n_variants=meta.get("n_variants")
+        if n_variants is None:
+            n_variants=info.get("n_variants")
         if n_variants is None and csv_path.exists():
             try:
                 import csv as _csv
@@ -415,15 +484,22 @@ def jobs():
                 n_variants=None
         out.append({
             "job_id":directory.name,
-            "modified":report_path.stat().st_mtime,
+            "modified":meta.get("created_ts") or report_path.stat().st_mtime,
+            "created":meta.get("created"),
             "n_variants":n_variants,
-            "sample":info.get("sample"),
-            "assembly":info.get("assembly"),
+            "sample":meta.get("sample") or info.get("sample"),
+            "assembly":meta.get("assembly") or info.get("assembly"),
+            "hpo":meta.get("hpo"),
+            "expanded_hpo":meta.get("expanded_hpo"),
+            "top_gene":meta.get("top_gene"),
+            "top_call":meta.get("top_call"),
+            "ai_layers":meta.get("ai_layers",[]),
+            "n_warnings":meta.get("n_warnings"),
             "status":info.get("status") or "done",
             "has_csv":csv_path.exists(),
         })
     out.sort(key=lambda item:item["modified"],reverse=True)
-    return {"jobs":out[:50]}
+    return {"jobs":out[:100]}
 
 
 @app.get("/api/report/{job_id}")
