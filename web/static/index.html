@@ -641,6 +641,11 @@ function formatDuration(seconds) {
   if (minutes) return `${minutes} min ${secs} s`;
   return `${secs} s`;
 }
+function setBar(p, m){
+  const fill = $('barfill');
+  if (fill) fill.style.width = Math.max(0, Math.min(100, Number(p) || 0)) + '%';
+  if (m != null) $('pmsg').textContent = m;
+}
 function renderProgressMeta(s) {
   const parts = [
     `<b>${esc(s.percent ?? 0)}%</b>`,

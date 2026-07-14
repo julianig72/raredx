@@ -98,6 +98,19 @@ def _annotation_workers():
         return 8
 
 
+def _variant_label(v):
+    """Short human label for progress messages: gene symbol when known, else chrom:pos."""
+    if not isinstance(v, dict):
+        return str(v)
+    gene=v.get("gene")
+    if gene:
+        return str(gene)
+    chrom=v.get("chrom"); pos=v.get("pos")
+    if chrom is not None and pos is not None:
+        return f"{chrom}:{pos}"
+    return v.get("rsid") or "variante"
+
+
 # Population allele frequency at/above which ACMG BA1 applies (stand-alone Benign). This is the
 # single source of truth for both classify() and the annotation prefilter — they MUST agree, or
 # the prefilter could route a sub-BA1 variant into the "Benign, skip deep layers" path where it
@@ -136,7 +149,7 @@ def _map_concurrent(items, fn, workers, on_progress=None):
         out=[]
         for k,it in enumerate(items,1):
             out.append(fn(it))
-            if on_progress: on_progress(k)
+            if on_progress: on_progress(k, it)
         return out
     out=[None]*n
     done=0
@@ -144,9 +157,10 @@ def _map_concurrent(items, fn, workers, on_progress=None):
         futures={ex.submit(fn,it):idx for idx,it in enumerate(items)}
         try:
             for fut in as_completed(futures):
-                out[futures[fut]]=fut.result()
+                idx=futures[fut]
+                out[idx]=fut.result()
                 done+=1
-                if on_progress: on_progress(done)
+                if on_progress: on_progress(done, items[idx])
         except BaseException:
             ex.shutdown(wait=False,cancel_futures=True)
             raise
@@ -228,6 +242,49 @@ def detect_vcf_assembly(path):
     raise VCFParseError(
         "could not detect genome assembly; add ##reference=GRCh38/GRCh37 or standard contig lengths"
     )
+
+
+def validate_vcf_head(path, sample=None):
+    """Cheap structural pre-check: validate the ``#CHROM`` header (and the requested sample for a
+    multi-sample VCF) and confirm at least one data record is present — WITHOUT parsing the whole
+    file. Reads only up to the first data line, so it is O(header) even for very large VCFs.
+
+    Raises :class:`VCFParseError` on a malformed, empty, header-only or wrong-sample VCF. Used by
+    the web layer to reject bad uploads fast; the full ``parse_vcf`` runs later inside the
+    background job (with live progress) so a large VCF no longer strands the UI on "Iniciando…".
+    """
+    header_seen=False
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("##"):
+                continue
+            if line.startswith("#CHROM"):
+                header=line.rstrip("\n").split("\t")
+                if len(header)<8:
+                    raise VCFParseError("invalid VCF header")
+                sample_names=header[9:]
+                if len(sample_names)>1:
+                    if sample in (None,"","SAMPLE"):
+                        names=", ".join(sample_names[:10])
+                        suffix="..." if len(sample_names)>10 else ""
+                        raise VCFParseError(
+                            f"multi-sample VCF requires an explicit sample ID; available: {names}{suffix}"
+                        )
+                    if sample not in sample_names:
+                        raise VCFParseError(f"sample {sample!r} not found in multi-sample VCF")
+                header_seen=True
+                continue
+            if line.startswith("#") or not line.strip():
+                continue
+            if not header_seen:
+                raise VCFParseError("invalid VCF: missing #CHROM header")
+            fields=line.rstrip("\n").split("\t")
+            if len(fields)<8:
+                raise VCFParseError("invalid VCF record: expected at least 8 columns")
+            return  # header + at least one structural data record → good enough to launch the job
+    if not header_seen:
+        raise VCFParseError("invalid VCF: missing #CHROM header")
+    raise VCFParseError("VCF contains no variant records")
 
 
 def _sample_for_alt(format_keys, sample_value, alt_index):
@@ -1817,19 +1874,36 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
         if progress:
             try: progress(done, total, msg)
             except Exception: pass
+    # Explicit, numbered, step-by-step progress. A running counter assigns each stage its number
+    # as it starts; _total_steps is computed with the SAME conditionals below, so the "Paso N/T"
+    # labels always line up whether or not the trio/agentic stages run.
+    _total_steps = 6  # read VCF · HPO profile · VEP+gnomAD · prefilter · deep evidence · priorización
+    if father_vcf or mother_vcf: _total_steps += 1   # + herencia (trío)
+    if agentic: _total_steps += 1                    # + razonamiento agéntico
+    _step = {"n": 0}
+    def _phase(msg, done=0, total=0):
+        _step["n"] += 1
+        _prog(done, total, f"Paso {_step['n']}/{_total_steps} · {msg}")
+        return _step["n"]
+    def _sub(step_no, msg, done, total):
+        _prog(done, total, f"Paso {step_no}/{_total_steps} · {msg}")
 
     _reset_llm_state()
     _check_cancelled()
-    _prog(0, 0, "Leyendo y filtrando VCF…")
+    _s_read = _phase("Leyendo el VCF y filtrando variantes con genotipo llamado…", 0, 0)
     if assembly in (None,"auto","AUTO"):
+        _sub(_s_read, "Detectando el ensamblaje del genoma desde los metadatos del VCF…", 0, 0)
         assembly=detect_vcf_assembly(vcf_path)
     variants=parse_vcf(
         vcf_path,sample=sample,allow_empty=False,max_variants=max_variants,called_only=True
     )
-    _prog(0, len(variants), f"VCF leído: {len(variants)} variantes")
+    _sub(_s_read, f"VCF leído ({assembly}): {len(variants)} variante(s) con genotipo llamado",
+         0, len(variants))
     warnings=[]
 
     # patient HPO profile — from clinical note (LLM) and/or explicit hpo string
+    _s_hpo = _phase("Construyendo el perfil fenotípico del paciente (términos HPO)…",
+                    0, len(variants))
     patient_hpo=[]
     if clinical_note_text:
         patient_hpo=extract_hpo_from_note(clinical_note_text, anthropic_key)
@@ -1840,9 +1914,12 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
             warnings.extend(f"Clinical-note extraction warning: {error}" for error in llm_errors)
         providers=sorted(getattr(_LLM_STATE,"providers",set()))
         provider_note=f" con {', '.join(providers)}" if providers else ""
-        _prog(0, len(variants), f"{len(patient_hpo)} fenotipos extraídos de la nota clínica{provider_note}")
+        _sub(_s_hpo, f"{len(patient_hpo)} fenotipo(s) extraído(s) de la nota clínica{provider_note}",
+             0, len(variants))
     tokens=[t for t in re.split(r"[,\n]", hpo or "") if t.strip()]
     if tokens:
+        _sub(_s_hpo, f"Resolviendo {len(tokens)} término(s) HPO en Ontology Lookup Service (OLS4)…",
+             0, len(variants))
         existing={t["hpo_id"] for t in patient_hpo}
         resolved=resolve_hpo(tokens)
         for t in resolved:
@@ -1855,12 +1932,16 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
             token.strip() for token in re.split(r"[,\n]",reviewed_hpo_expansion)
             if token.strip()
         ]
+        _sub(_s_hpo, f"Aplicando el perfil HPO ampliado revisado ({len(reviewed_tokens)} término(s))…",
+             0, len(variants))
         reviewed_terms=resolve_hpo(reviewed_tokens)
         patient_full={term["hpo_id"] for term in reviewed_terms}|patient_ids
         hpo_expansion_available=len(reviewed_terms)==len(reviewed_tokens)
         if not hpo_expansion_available:
             warnings.append("Some reviewed expanded HPO terms could not be resolved")
     elif patient_ids and expand_hpo_terms:
+        _sub(_s_hpo, "Expandiendo HPO a términos ancestro (característica opcional)…",
+             0, len(variants))
         patient_full,hpo_expansion_available=expand_hpo(patient_ids,return_status=True)
         if not hpo_expansion_available:
             warnings.append("HPO ancestor expansion was partially unavailable; phenotype matching may be incomplete")
@@ -1880,9 +1961,11 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
         )
     if patient_hpo:
         if len(patient_full)>len(patient_ids):
-            _prog(0, len(variants), f"{len(patient_ids)} términos HPO (expandidos a {len(patient_full)})")
+            _sub(_s_hpo, f"Perfil fenotípico listo: {len(patient_ids)} término(s) HPO "
+                 f"(expandidos a {len(patient_full)})", 0, len(variants))
         else:
-            _prog(0, len(variants), f"{len(patient_ids)} términos HPO directos (sin expansión)")
+            _sub(_s_hpo, f"Perfil fenotípico listo: {len(patient_ids)} término(s) HPO "
+                 f"directo(s) (sin expansión)", 0, len(variants))
 
     cons_cache={}
     pheno_cache={}
@@ -1974,10 +2057,14 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
 
     # Phase 1: consequence + population allele frequency for every called variant (concurrent).
     total=len(variants)
+    _s_freq=_phase(
+        f"Anotando consecuencia funcional (Ensembl VEP) y frecuencia poblacional (gnomAD) "
+        f"en {total} variante(s)…", 0, total)
     freq_flags=_map_concurrent(
         variants, _annotate_frequency, n_workers,
-        lambda done: (done % 20 == 0 or done == total)
-                     and _prog(done, total, f"Anotando frecuencias: {done}/{total}"))
+        lambda done, v: (done==1 or done % 10 == 0 or done == total)
+                     and _sub(_s_freq, f"VEP + gnomAD · {done}/{total} · última: {_variant_label(v)}",
+                              done, total))
     vep_failures=sum(1 for f in freq_flags if not f["vep_ok"])
     gnomad_failures=sum(1 for f in freq_flags if not f["af_ok"])
 
@@ -1993,16 +2080,27 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
     for v in common:
         _default_deep_fields(v)
         _finalize(v, do_pheno=False)
-    _prog(0, total,
-          f"Prefiltrado: {len(candidates)} candidatas para análisis profundo "
-          f"({len(common)} comunes AF≥{AF_COMMON:.0%} clasificadas como benignas)")
+    _phase(
+        f"Prefiltrado por frecuencia: {len(candidates)} candidata(s) para análisis profundo; "
+        f"{len(common)} común(es) (AF≥{AF_COMMON:.0%}) clasificada(s) como benignas por BA1",
+        0, total)
 
     # Phase 2: deep evidence only for the plausible candidates (concurrent).
     n_cand=len(candidates)
+    _deep_sources=["constraint génico (gnomAD)","ClinVar"]
+    if use_esm: _deep_sources.append("ESM-2")
+    if use_am: _deep_sources.append("AlphaMissense")
+    _deep_sources.append("criterios ACMG")
+    if patient_ids: _deep_sources.append("ajuste fenotípico (Open Targets)")
+    _s_deep=_phase(
+        f"Evidencia clínica profunda de {n_cand} candidata(s): " + ", ".join(_deep_sources) + "…",
+        0, n_cand)
     deep_flags=_map_concurrent(
         candidates, _annotate_deep, n_workers,
-        lambda done: (done % 10 == 0 or done == n_cand)
-                     and _prog(done, n_cand, f"Análisis profundo de candidatas: {done}/{n_cand}"))
+        lambda done, v: (done==1 or done % 5 == 0 or done == n_cand)
+                     and _sub(_s_deep,
+                              f"Evidencia por candidata · {done}/{n_cand} · última: "
+                              f"{_variant_label(v)} → {v.get('call','—')}", done, n_cand))
     clinvar_failures=sum(1 for f in deep_flags if not f["clinvar_ok"])
     constraint_failures=sum(1 for f in deep_flags if not f["constraint_ok"])
     am_attempts=sum(1 for f in deep_flags if f["am_attempt"])
@@ -2029,13 +2127,19 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
 
     # trio inheritance (optional) — assigns v["inheritance"]; de novo adds PS2 (supporting strong)
     if father_vcf or mother_vcf:
+        _s_trio=_phase(
+            "Analizando la herencia en el trío (comparando el genotipo con el de los padres)…",
+            len(variants), len(variants))
         n_trio=trio_inheritance(variants, father_vcf, mother_vcf, progress)
         for v in variants:
             if v.get("inheritance")=="de_novo":
                 v["_tags"].append(("PS2","de novo (absent in both explicitly genotyped parents)"))
                 v["call"]=_call_from_tags(v["_tags"],v.get("clinvar"))
-        _prog(len(variants), len(variants), f"Herencia analizada en {n_trio} variantes")
+        _sub(_s_trio, f"Herencia analizada en {n_trio} variante(s) (de novo → PS2 donde corresponde)",
+             len(variants), len(variants))
 
+    _s_prior=_phase("Clasificación ACMG final y priorización de las variantes…",
+                    len(variants), len(variants))
     for v in variants:
         tags=v.pop("_tags")
         v["acmg_tags"]=",".join(t[0] for t in tags)
@@ -2047,11 +2151,13 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
         v["combined"]=round(c,3)
     variants.sort(key=lambda v:-v["combined"])
     for i,v in enumerate(variants,1): v["rank"]=i
-    _prog(len(variants), len(variants), "Priorización completa")
+    _sub(_s_prior, "Priorización completa", len(variants), len(variants))
 
     # agentic reasoning layer (self-reflection + traceable differential) — optional, needs LLM
     agentic_result=None
     if agentic:
+        _phase(f"Razonamiento agéntico: autorreflexión sobre las {reflect_k} variantes principales…",
+               len(variants), len(variants))
         agentic_result=agentic_diagnosis(variants, patient_hpo, api_key=anthropic_key,
                                           sample=sample, progress=progress, start_k=reflect_k)
         if agentic_result is None:

@@ -345,19 +345,20 @@ async def analyze(
         mother_path = str(outdir / "mother.vcf"); await _stream(mother, mother_path)
 
     def _validate_and_detect():
-        rx.parse_vcf(
-            vcf_path,sample=sample,allow_empty=False,max_variants=MAX_VARIANTS,called_only=True
-        )
-        resolved = rx.detect_vcf_assembly(vcf_path) if assembly=="auto" else assembly
+        # Cheap pre-job checks only: validate the header (and the requested sample) and detect the
+        # assembly from VCF metadata WITHOUT parsing the whole file. The full parse now happens once
+        # inside the background job (run_pipeline), which streams live "Paso N/…" progress — so a
+        # large VCF no longer strands the browser on "Iniciando…" during a silent double parse.
+        rx.validate_vcf_head(vcf_path, sample=sample)
         if father_path:
-            rx.parse_vcf(father_path)
+            rx.validate_vcf_head(father_path)
         if mother_path:
-            rx.parse_vcf(mother_path)
-        return resolved
+            rx.validate_vcf_head(mother_path)
+        return rx.detect_vcf_assembly(vcf_path) if assembly=="auto" else assembly
 
     try:
-        # Parsing a large VCF is blocking + CPU-bound; run it off the event loop so
-        # status polling, /api/jobs and static assets stay responsive meanwhile.
+        # Header validation + assembly detection are O(header); running them off the event loop
+        # keeps status polling, /api/jobs and static assets responsive during the upload handoff.
         assembly = await asyncio.to_thread(_validate_and_detect)
     except (OSError,rx.VCFParseError) as e:
         shutil.rmtree(outdir,ignore_errors=True)
