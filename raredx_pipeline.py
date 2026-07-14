@@ -60,15 +60,15 @@ def _check_cancelled():
         raise AnalysisCancelled("analysis cancelled by user")
 
 
-def _request_timeout():
+def _request_timeout(cap=30):
     _check_cancelled()
     deadline=getattr(_REQUEST_STATE,"deadline",None)
     if deadline is None:
-        return 30
+        return cap
     remaining=deadline-time.monotonic()
     if remaining<=0:
         raise TimeoutError("analysis exceeded its configured wall-clock deadline")
-    return max(0.1,min(30,remaining))
+    return max(0.1,min(cap,remaining))
 
 
 def _retry_wait(attempt):
@@ -191,6 +191,23 @@ def _gql(url, query, variables=None):
             if r.status_code not in (408,425,429) and not 500<=r.status_code<600:
                 return None
             _retry_wait(i)
+        except requests.RequestException:
+            _retry_wait(i)
+    return None
+
+def _post_json(url, body, params=None, cap=30):
+    """POST a JSON body and return the parsed response, with the same retry/deadline policy as
+    _get/_gql. Used for Ensembl VEP's batch region endpoint (many variants in one request)."""
+    for i in range(4):
+        try:
+            r=requests.post(url, json=body, params=params or {}, headers=UA,
+                            timeout=_request_timeout(cap))
+            if r.status_code==200:
+                return r.json()
+            if r.status_code in (408,425,429) or 500<=r.status_code<600:
+                _retry_wait(i)
+                continue
+            return None
         except requests.RequestException:
             _retry_wait(i)
     return None
@@ -456,6 +473,48 @@ def parse_vcf(path, sample=None, allow_empty=True, max_variants=None, called_onl
     return out
 
 # ---------- annotation ----------
+def _vep_alt_allele(ref, alt):
+    """VEP's minimal-allele form of a VCF ref/alt (shared leading base stripped for indels):
+    SNV -> alt; deletion -> '-'; insertion -> inserted bases. gnomAD frequencies inside a VEP
+    response are keyed by this form for indels, not by the raw VCF ALT."""
+    if len(ref)==len(alt)==1:
+        return alt
+    if ref[:1]==alt[:1]:
+        r,a=ref[1:],alt[1:]
+        if a=="": return "-"
+        if r=="": return a
+    return alt
+
+def _vep_region_params(assembly):
+    params={"content-type":"application/json"}
+    if assembly=="GRCh37": params.update({"AF_gnomade":1,"AF_gnomadg":1,"sift":1,"polyphen":1})
+    return params
+
+def _parse_vep_result(r, rec):
+    """Turn one Ensembl VEP result object into the annotation dict RareDX consumes. Shared by the
+    single-variant GET (vep) and the batched POST (vep_batch) so both produce identical output."""
+    tcs=r.get("transcript_consequences") or []
+    most_severe=r.get("most_severe_consequence")
+    severe=[t for t in tcs if most_severe in (t.get("consequence_terms") or [])]
+    ranked=sorted(severe or tcs,key=lambda t:-int(t.get("canonical",0) or 0))
+    representative=ranked[0] if ranked else {}
+    alt=rec["alt"]; vep_alt=_vep_alt_allele(rec["ref"],alt)
+    # gnomAD AF from colocated frequencies (populated on the GRCh37 endpoint); keyed by the VCF
+    # ALT for SNVs and by VEP's minimal allele for indels.
+    gaf=None
+    for cv in (r.get("colocated_variants") or []):
+        fr=cv.get("frequencies") or {}
+        d=fr.get(alt) or fr.get(alt.upper()) or fr.get(vep_alt)
+        if d:
+            vals=[d.get(k) for k in ("gnomade","gnomadg","gnomad") if d.get(k) is not None]
+            if vals:
+                gaf=max(vals) if gaf is None else max(gaf,*vals)
+    return dict(most_severe=most_severe,gene=representative.get("gene_symbol"),
+                gene_id=representative.get("gene_id"),amino_acids=representative.get("amino_acids"),
+                sift=representative.get("sift_prediction"),polyphen=representative.get("polyphen_prediction"),
+                gnomad_af=gaf,annotation_available=True,
+                colocated=[c.get("id") for c in (r.get("colocated_variants") or []) if str(c.get("id","")).startswith("rs")])
+
 def vep(rec, assembly="GRCh38"):
     """Ensembl VEP by region+allele (works without an rsID). Assembly-aware: for GRCh37 it
     uses the GRCh37 REST endpoint and also harvests gnomAD AF from colocated_variants, since
@@ -463,34 +522,33 @@ def vep(rec, assembly="GRCh38"):
     base = ENSEMBL if assembly == "GRCh38" else ENSEMBL_GRCH37
     reg=f'{rec["chrom"]}:{rec["pos"]}-{rec["pos"]+len(rec["ref"])-1}'
     url=f'{base}/vep/human/region/{reg}/{rec["alt"]}'
-    params={"content-type":"application/json"}
-    if assembly=="GRCh37": params.update({"AF_gnomade":1,"AF_gnomadg":1,"sift":1,"polyphen":1})
-    j=_get(url, params=params)
+    j=_get(url, params=_vep_region_params(assembly))
     if not j: return {"annotation_available":False}
-    r=j[0]
-    tcs=r.get("transcript_consequences") or []
-    most_severe=r.get("most_severe_consequence")
-    severe=[t for t in tcs if most_severe in (t.get("consequence_terms") or [])]
-    ranked=sorted(severe or tcs,key=lambda t:-int(t.get("canonical",0) or 0))
-    representative=ranked[0] if ranked else {}
-    gene=representative.get("gene_symbol")
-    gid=representative.get("gene_id")
-    sift=representative.get("sift_prediction")
-    poly=representative.get("polyphen_prediction")
-    aa=representative.get("amino_acids")
-    # gnomAD AF from colocated frequencies (populated on the GRCh37 endpoint)
-    gaf=None
-    for cv in (r.get("colocated_variants") or []):
-        fr=cv.get("frequencies") or {}
-        d=fr.get(rec["alt"]) or fr.get(rec["alt"].upper())
-        if d:
-            vals=[d.get(k) for k in ("gnomade","gnomadg","gnomad") if d.get(k) is not None]
-            if vals:
-                gaf=max(vals) if gaf is None else max(gaf,*vals)
-    return dict(most_severe=most_severe,gene=gene,gene_id=gid,
-                amino_acids=aa,sift=sift,polyphen=poly,gnomad_af=gaf,
-                annotation_available=True,
-                colocated=[c.get("id") for c in (r.get("colocated_variants") or []) if str(c.get("id","")).startswith("rs")])
+    return _parse_vep_result(j[0], rec)
+
+VEP_BATCH_SIZE=max(1,min(200,int(os.environ.get("RAREDX_VEP_BATCH_SIZE","200"))))
+
+def vep_batch(records, assembly="GRCh38"):
+    """Annotate many variants in ONE Ensembl VEP POST (region endpoint, VCF-format input) and
+    return a list of annotation dicts aligned to `records` (same shape as vep()). This is the key
+    scaling fix: a whole-exome VCF becomes ~len(records)/200 requests instead of one per variant.
+    Responses are matched back to inputs by VEP's verbatim `input` echo; any record the batch
+    endpoint doesn't return is filled by a single-variant vep() fallback."""
+    if not records: return []
+    base=ENSEMBL if assembly=="GRCh38" else ENSEMBL_GRCH37
+    lines=[f'{r["chrom"]} {r["pos"]} . {r["ref"]} {r["alt"]}' for r in records]
+    j=_post_json(f"{base}/vep/human/region",{"variants":lines},
+                 params=_vep_region_params(assembly),cap=60)
+    by_input={}
+    if isinstance(j,list):
+        for item in j:
+            key=item.get("input")
+            if key is not None: by_input[str(key).strip()]=item
+    out=[]
+    for rec,line in zip(records,lines):
+        item=by_input.get(line.strip())
+        out.append(_parse_vep_result(item,rec) if item is not None else vep(rec,assembly))
+    return out
 
 GNOMAD_VAR_Q="""query($vid:String!,$ds:DatasetId!){
  variant(variantId:$vid, dataset:$ds){ exome{af homozygote_count} genome{af homozygote_count} } }"""
@@ -1974,22 +2032,6 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
     _deadline=getattr(_REQUEST_STATE,"deadline",None)
     _cancel=getattr(_REQUEST_STATE,"cancel_event",None)
 
-    def _annotate_frequency(v):
-        """Phase 1 (cheap): consequence + population allele frequency only."""
-        set_request_deadline(_deadline); set_request_cancel_event(_cancel)
-        _request_timeout()
-        ve=vep(v, assembly); v.update(consequence=ve.get("most_severe"), gene=ve.get("gene"),
-                            gene_id=ve.get("gene_id"), protein=ve.get("amino_acids"),
-                            sift=ve.get("sift"), polyphen=ve.get("polyphen"))
-        vep_ok=bool(ve.get("annotation_available"))
-        if assembly=="GRCh38":
-            v["af"],af_ok=gnomad_af(v,return_status=True)
-        else:
-            v["af"],af_ok=ve.get("gnomad_af"),vep_ok
-        v["af_status"]=("observed" if v["af"] is not None else "absent" if af_ok else "unavailable")
-        v["_af_ok"]=af_ok
-        return {"vep_ok":vep_ok,"af_ok":af_ok}
-
     def _default_deep_fields(v):
         v["pli"]=None; v["loeuf"]=None
         v["clinvar"]=None; v["stars"]=None; v["conditions"]=None
@@ -2055,18 +2097,55 @@ def run_pipeline(vcf_path, sample="SAMPLE", hpo="", clinical_note_text=None, ass
         flags["pheno_failed"]=_finalize(v, do_pheno=True)
         return flags
 
-    # Phase 1: consequence + population allele frequency for every called variant (concurrent).
+    # Phase 1: consequence + population allele frequency for every called variant.
+    # VEP is batched (one POST per ~200 variants) so a whole-exome VCF costs ~total/200 requests
+    # instead of one per variant — this is what keeps large VCFs inside the wall-clock budget.
+    # gnomAD AF rides along in the VEP response on GRCh37; on GRCh38 it comes from a separate
+    # concurrent gnomAD r4 pass below (the GraphQL API is GRCh38-only and newer than VEP's copy).
     total=len(variants)
     _s_freq=_phase(
         f"Anotando consecuencia funcional (Ensembl VEP) y frecuencia poblacional (gnomAD) "
         f"en {total} variante(s)…", 0, total)
-    freq_flags=_map_concurrent(
-        variants, _annotate_frequency, n_workers,
-        lambda done, v: (done==1 or done % 10 == 0 or done == total)
-                     and _sub(_s_freq, f"VEP + gnomAD · {done}/{total} · última: {_variant_label(v)}",
-                              done, total))
-    vep_failures=sum(1 for f in freq_flags if not f["vep_ok"])
-    gnomad_failures=sum(1 for f in freq_flags if not f["af_ok"])
+    _chunks=[variants[i:i+VEP_BATCH_SIZE] for i in range(0,total,VEP_BATCH_SIZE)]
+    _vep_label="VEP" if assembly=="GRCh38" else "VEP + gnomAD"
+    _seen_vep=[0]
+    def _freq_chunk(chunk):
+        set_request_deadline(_deadline); set_request_cancel_event(_cancel)
+        _request_timeout()
+        for v,ve in zip(chunk, vep_batch(chunk, assembly)):
+            v.update(consequence=ve.get("most_severe"), gene=ve.get("gene"),
+                     gene_id=ve.get("gene_id"), protein=ve.get("amino_acids"),
+                     sift=ve.get("sift"), polyphen=ve.get("polyphen"))
+            v["_vep_ok"]=bool(ve.get("annotation_available"))
+            if assembly!="GRCh38":
+                af=ve.get("gnomad_af"); af_ok=v["_vep_ok"]
+                v["af"]=af; v["_af_ok"]=af_ok
+                v["af_status"]=("observed" if af is not None else "absent" if af_ok else "unavailable")
+        return chunk
+    def _freq_prog(_dc, chunk):
+        _seen_vep[0]+=len(chunk)
+        _sub(_s_freq, f"{_vep_label} · {_seen_vep[0]}/{total} · última: {_variant_label(chunk[-1])}",
+             _seen_vep[0], total)
+    _map_concurrent(_chunks, _freq_chunk, max(1,min(n_workers,6)), _freq_prog)
+
+    # GRCh38 only: population allele frequency from the current gnomAD r4 GraphQL API
+    # (one call per variant, concurrent). Kept separate from VEP so ACMG frequency criteria use
+    # the newest gnomAD release rather than VEP's bundled (older) copy.
+    if assembly=="GRCh38":
+        def _freq_af(v):
+            set_request_deadline(_deadline); set_request_cancel_event(_cancel)
+            af,af_ok=gnomad_af(v, return_status=True)
+            v["af"]=af; v["_af_ok"]=af_ok
+            v["af_status"]=("observed" if af is not None else "absent" if af_ok else "unavailable")
+            return v
+        _map_concurrent(
+            variants, _freq_af, n_workers,
+            lambda done, v: (done==1 or done % 10 == 0 or done == total)
+                         and _sub(_s_freq, f"gnomAD · {done}/{total} · última: {_variant_label(v)}",
+                                  done, total))
+
+    vep_failures=sum(1 for v in variants if not v.get("_vep_ok"))
+    gnomad_failures=sum(1 for v in variants if not v.get("_af_ok"))
 
     if vep_failures==total:
         raise RuntimeError("Ensembl VEP unavailable for every variant; analysis aborted")

@@ -492,6 +492,43 @@ def test_grch37_frequency_is_bound_to_alt_allele(monkeypatch):
     assert annotation["gnomad_af"] == 0.00001
 
 
+def test_vep_batch_aligns_results_and_falls_back(monkeypatch):
+    recs = [
+        {"chrom": "1", "pos": 100, "ref": "A", "alt": "G"},
+        {"chrom": "1", "pos": 200, "ref": "C", "alt": "T"},
+        {"chrom": "2", "pos": 300, "ref": "G", "alt": "A"},
+    ]
+
+    # Batch endpoint returns results OUT OF ORDER and OMITS pos 200 (to exercise the fallback).
+    def fake_post(url, body, params=None, cap=30):
+        assert url.endswith("/vep/human/region")
+        assert body["variants"] == ["1 100 . A G", "1 200 . C T", "2 300 . G A"]
+        return [
+            {"input": "2 300 . G A", "most_severe_consequence": "missense_variant",
+             "transcript_consequences": [{"canonical": 1, "gene_symbol": "GENZ", "gene_id": "ENSG9"}]},
+            {"input": "1 100 . A G", "most_severe_consequence": "synonymous_variant",
+             "transcript_consequences": [{"canonical": 1, "gene_symbol": "GENA", "gene_id": "ENSG1"}]},
+        ]
+
+    fallback_calls = []
+
+    def fake_vep(rec, assembly):
+        fallback_calls.append(rec["pos"])
+        return {"most_severe": "stop_gained", "gene": "GENB", "annotation_available": True}
+
+    monkeypatch.setattr(rx, "_post_json", fake_post)
+    monkeypatch.setattr(rx, "vep", fake_vep)
+
+    out = rx.vep_batch(recs, "GRCh38")
+
+    # Output is aligned to the input order, not the (shuffled) response order.
+    assert [o.get("most_severe") for o in out] == [
+        "synonymous_variant", "stop_gained", "missense_variant"]
+    assert out[0]["gene"] == "GENA" and out[2]["gene"] == "GENZ"
+    # Only the variant the batch omitted (pos 200) used the single-variant fallback.
+    assert fallback_calls == [200]
+
+
 def test_clinvar_selects_only_exact_allele(monkeypatch):
     wrong = {
         "variation_set": [
@@ -1056,7 +1093,7 @@ def test_prefilter_skips_deep_layers_for_common_variants_and_ranks_candidates(tm
     deep_calls = {"clinvar": set(), "constraint": set()}
 
     monkeypatch.setattr(rx, "_annotation_workers", lambda: 4)
-    monkeypatch.setattr(rx, "vep", lambda v, assembly: vep_by_pos[v["pos"]])
+    monkeypatch.setattr(rx, "vep_batch", lambda recs, assembly: [vep_by_pos[v["pos"]] for v in recs])
     monkeypatch.setattr(rx, "gnomad_af", lambda v, return_status=False: (af_by_pos[v["pos"]], True))
 
     def fake_constraint(gene, cache):
@@ -1116,7 +1153,7 @@ def test_progress_messages_are_explicit_step_by_step(tmp_path, monkeypatch):
               "annotation_available": True, "gnomad_af": None},
     }
     monkeypatch.setattr(rx, "_annotation_workers", lambda: 2)
-    monkeypatch.setattr(rx, "vep", lambda v, assembly: vep_by_pos[v["pos"]])
+    monkeypatch.setattr(rx, "vep_batch", lambda recs, assembly: [vep_by_pos[v["pos"]] for v in recs])
     monkeypatch.setattr(rx, "gnomad_af", lambda v, return_status=False: (af_by_pos[v["pos"]], True))
     monkeypatch.setattr(rx, "gnomad_constraint",
                         lambda gene, cache: {"pli": None, "loeuf": None, "available": True})
@@ -1165,10 +1202,10 @@ def test_hpo_expansion_is_opt_in_not_automatic(tmp_path, monkeypatch):
         ["1\t200\t.\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/1\n"],
     )
     monkeypatch.setattr(rx, "_annotation_workers", lambda: 1)
-    monkeypatch.setattr(rx, "vep", lambda v, assembly: {
+    monkeypatch.setattr(rx, "vep_batch", lambda recs, assembly: [{
         "most_severe": "missense_variant", "gene": "GENB", "gene_id": "ENSG2",
         "amino_acids": "V/M", "sift": None, "polyphen": None,
-        "annotation_available": True, "gnomad_af": None})
+        "annotation_available": True, "gnomad_af": None} for v in recs])
     monkeypatch.setattr(rx, "gnomad_af", lambda v, return_status=False: (1e-5, True))
     monkeypatch.setattr(rx, "gnomad_constraint",
                         lambda gene, cache: {"pli": None, "loeuf": None, "available": True})
