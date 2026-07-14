@@ -530,6 +530,17 @@ def csv(job_id: str):
 
 # serve the static SPA (index.html + assets) at /
 _static = Path(__file__).resolve().parent / "static"
+
+@app.get("/", include_in_schema=False)
+def _index():
+    # Always serve fresh HTML so UI/JS fixes reach the browser without a manual hard-reload.
+    # (An open tab caching an old index.html was leaving users stuck on a static "Iniciando…".)
+    return FileResponse(
+        str(_static / "index.html"), media_type="text/html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate",
+                 "Pragma": "no-cache", "Expires": "0"},
+    )
+
 app.mount("/", StaticFiles(directory=str(_static), html=True), name="static")
 
 if __name__ == "__main__":

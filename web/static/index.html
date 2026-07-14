@@ -53,6 +53,24 @@
   .pmeta{font-size:11.5px;color:#95a5a6;margin-top:4px;line-height:1.55}
   .pmeta b{color:#5d6d7e;font-weight:600}
   .psources{white-space:normal}
+  .steplist{margin:2px 0 14px;display:flex;flex-direction:column;gap:1px}
+  .step{display:flex;align-items:flex-start;gap:10px;padding:7px 3px;border-radius:7px}
+  .step.active{background:#f2fbf8}
+  .step .ico{flex:0 0 21px;width:21px;height:21px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:700;background:#e4e9ef;color:#95a5a6;margin-top:1px}
+  .step .sbody{flex:1;min-width:0}
+  .step .sname{font-size:13px;color:#95a5a6;line-height:1.35}
+  .step .stepbar{height:5px;background:#e9eef3;border-radius:4px;overflow:hidden;margin-top:7px;display:none}
+  .step .stepbar > i{display:block;height:100%;width:0;background:linear-gradient(90deg,#16a085,#1abc9c);transition:width .35s}
+  .step .sdetail{font-size:11.5px;color:#9aa7b1;margin-top:5px;display:none;line-height:1.45}
+  .step.active .ico{background:#1abc9c;color:#fff}
+  .step.active .sname{color:#20313f;font-weight:600}
+  .step.active .stepbar,.step.active .sdetail{display:block}
+  .step.done .ico{background:#16a085;color:#fff}
+  .step.done .sname{color:#5d6d7e}
+  .step .stepbar.indet > i{width:34%;animation:indet 1.15s ease-in-out infinite}
+  @keyframes indet{0%{margin-left:-34%}100%{margin-left:100%}}
+  .spin{display:inline-block;width:11px;height:11px;border:2px solid rgba(255,255,255,.55);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
   .results{display:none}
   #repframe{width:100%;height:72vh;border:1px solid #e5e9f0;border-radius:8px;background:#fff;margin-top:10px}
   .recenthead,.rephead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
@@ -160,8 +178,9 @@ método ortogonal (Sanger) y ser interpretado por un genetista clínico con el c
   <button type="button" class="cancel" id="cancel">Detener análisis</button>
 
   <div class="prog" id="prog">
-    <div class="bar"><i id="barfill"></i></div>
-    <div class="pmsg" id="pmsg">Iniciando…</div>
+    <div class="steplist" id="steplist"></div>
+    <div class="bar overall"><i id="barfill"></i></div>
+    <div class="pmsg" id="pmsg">Preparando el análisis…</div>
     <div class="pmeta" id="pmeta"></div>
   </div>
   <div class="err" id="err"></div>
@@ -238,6 +257,7 @@ let extractedNote = '';
 let extractedHpoIds = new Set();
 let expandedHpoTerms = [];
 let expandedFor = '';
+let stepPlan = [];
 let removedExpandedHpoIds = new Set();
 let activeJob = null;
 let shownJob = null;
@@ -287,7 +307,8 @@ $('extracthpo').onclick = async () => {
     $('extractstatus').textContent = `${(payload.terms || []).length} términos extraídos${provider ? ' con ' + provider : ''}.`
       + (warnings.length ? ` Aviso: ${warnings.join('; ')}` : '');
     removedExpandedHpoIds.clear();
-    await expandReviewedHpo();
+    // HPO ontology expansion is a separate, OPTIONAL step — it must not run automatically on
+    // extraction. The user triggers it explicitly with the "Expandir HPO (opcional)" button.
   } catch (e) {
     showErr('Error al extraer HPO: ' + e.message);
     $('extractstatus').textContent = '';
@@ -441,7 +462,11 @@ $('go').onclick = async () => {
     return;
   }
   hideErr(); $('results').style.display = 'none';
-  $('go').disabled = true; $('prog').style.display = 'block'; setBar(3, 'Subiendo VCF…');
+  $('go').disabled = true; $('prog').style.display = 'block';
+  stepPlan = buildStepPlan();
+  renderStepList(stepPlan);
+  updateStepList(1, 'Subiendo el VCF al servidor…', 0);
+  setBar(3, 'Subiendo VCF…');
 
   const fd = new FormData();
   fd.append('vcf', file);
@@ -500,6 +525,7 @@ function poll(job){
     if (s.status === 'error') { fail(s.message); return; }
     if (s.status === 'cancelled') { stopped(s.message || 'Análisis detenido.'); return; }
     setBar(Math.max(s.percent, 5), s.message || 'Procesando…');
+    syncStepList(s);
     renderProgressMeta(s);
     if (s.status === 'done') { done(job, s); return; }
     setTimeout(tick, 1200);
@@ -525,6 +551,7 @@ $('cancel').onclick = async () => {
 
 function done(job, s){
   setBar(100, 'Análisis completo');
+  if (stepPlan.length) updateStepList(stepPlan.length + 1, '', 1);
   $('go').disabled = false;
   $('cancel').style.display = 'none';
   activeJob = null;
@@ -640,6 +667,72 @@ function formatDuration(seconds) {
   if (hours) return `${hours} h ${minutes} min`;
   if (minutes) return `${minutes} min ${secs} s`;
   return `${secs} s`;
+}
+// ---- step-by-step progress list -------------------------------------------------
+// The client mirrors the pipeline's conditional stages so, the instant "Analizar" is
+// clicked, the user sees the full list of what the analysis will do. The active step and
+// its own progress bar are then driven by parsing the "Paso N/T · …" status messages.
+function buildStepPlan(){
+  const trio = !!($('father').files[0] || $('mother').files[0]);
+  const steps = [
+    'Leer el VCF y filtrar variantes con genotipo llamado',
+    'Construir el perfil fenotípico (términos HPO)',
+    'Consecuencia funcional y frecuencia · Ensembl VEP + gnomAD',
+    'Prefiltrado por frecuencia poblacional',
+    'Evidencia clínica profunda · ClinVar · constraint · ACMG',
+  ];
+  if (trio) steps.push('Herencia en el trío (comparación con los padres)');
+  steps.push('Clasificación ACMG final y priorización');
+  if ($('agentic').checked) steps.push('Razonamiento agéntico (autorreflexión)');
+  return steps;
+}
+function renderStepList(plan){
+  const wrap = $('steplist');
+  wrap.replaceChildren();
+  plan.forEach((label, i) => {
+    const step = document.createElement('div');
+    step.className = 'step';
+    step.innerHTML =
+      `<div class="ico">${i+1}</div>`
+      + `<div class="sbody"><div class="sname"></div>`
+      + `<div class="stepbar"><i></i></div><div class="sdetail"></div></div>`;
+    step.querySelector('.sname').textContent = label;
+    wrap.appendChild(step);
+  });
+}
+function updateStepList(current, detail, frac){
+  const steps = $('steplist').children;
+  for (let i = 0; i < steps.length; i++){
+    const n = i + 1, step = steps[i];
+    const ico = step.querySelector('.ico');
+    const barWrap = step.querySelector('.stepbar');
+    const bar = step.querySelector('.stepbar > i');
+    const det = step.querySelector('.sdetail');
+    step.classList.remove('active', 'done');
+    barWrap.classList.remove('indet');
+    if (n < current){
+      step.classList.add('done'); ico.textContent = '✓'; bar.style.width = '100%';
+      det.textContent = '';
+    } else if (n === current){
+      step.classList.add('active'); ico.innerHTML = '<span class="spin"></span>';
+      det.textContent = detail || '';
+      if (frac > 0){ bar.style.width = Math.round(frac * 100) + '%'; }
+      else { barWrap.classList.add('indet'); bar.style.width = '0'; }
+    } else {
+      ico.textContent = n; bar.style.width = '0'; det.textContent = '';
+    }
+  }
+}
+function parseStep(message){
+  const m = /^Paso\s+(\d+)\/(\d+)\s*·\s*([\s\S]*)$/.exec(message || '');
+  return m ? { n: +m[1], total: +m[2], detail: m[3].trim() } : null;
+}
+function syncStepList(s){
+  if (!stepPlan.length) return;
+  const parsed = parseStep(s.message);
+  if (!parsed) return;                       // keep the current active step until the first "Paso …"
+  const frac = (s.total > 0) ? (s.done / s.total) : 0;
+  updateStepList(parsed.n, parsed.detail, frac);
 }
 function setBar(p, m){
   const fill = $('barfill');

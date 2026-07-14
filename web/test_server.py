@@ -29,11 +29,14 @@ MINI_VCF = (
 def test_static_index_served():
     r = client.get("/")
     assert r.status_code == 200
+    # served with no-store so UI/JS fixes always reach the browser (no stale cached page)
+    assert "no-store" in r.headers.get("cache-control", "").lower()
     assert "Analizar VCF" in r.text  # the upload UI
     assert "Extraer HPO con Copilot" in r.text
     assert "Ensamblaje del genoma" in r.text
     assert "Expandir HPO (opcional)" in r.text
     assert "Detener análisis" in r.text
+    assert 'id="steplist"' in r.text  # step-by-step progress list container
 
 
 def test_empty_upload_rejected():
