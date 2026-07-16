@@ -492,6 +492,43 @@ def test_grch37_frequency_is_bound_to_alt_allele(monkeypatch):
     assert annotation["gnomad_af"] == 0.00001
 
 
+def test_vep_batch_aligns_results_and_falls_back(monkeypatch):
+    recs = [
+        {"chrom": "1", "pos": 100, "ref": "A", "alt": "G"},
+        {"chrom": "1", "pos": 200, "ref": "C", "alt": "T"},
+        {"chrom": "2", "pos": 300, "ref": "G", "alt": "A"},
+    ]
+
+    # Batch endpoint returns results OUT OF ORDER and OMITS pos 200 (to exercise the fallback).
+    def fake_post(url, body, params=None, cap=30):
+        assert url.endswith("/vep/human/region")
+        assert body["variants"] == ["1 100 . A G", "1 200 . C T", "2 300 . G A"]
+        return [
+            {"input": "2 300 . G A", "most_severe_consequence": "missense_variant",
+             "transcript_consequences": [{"canonical": 1, "gene_symbol": "GENZ", "gene_id": "ENSG9"}]},
+            {"input": "1 100 . A G", "most_severe_consequence": "synonymous_variant",
+             "transcript_consequences": [{"canonical": 1, "gene_symbol": "GENA", "gene_id": "ENSG1"}]},
+        ]
+
+    fallback_calls = []
+
+    def fake_vep(rec, assembly):
+        fallback_calls.append(rec["pos"])
+        return {"most_severe": "stop_gained", "gene": "GENB", "annotation_available": True}
+
+    monkeypatch.setattr(rx, "_post_json", fake_post)
+    monkeypatch.setattr(rx, "vep", fake_vep)
+
+    out = rx.vep_batch(recs, "GRCh38")
+
+    # Output is aligned to the input order, not the (shuffled) response order.
+    assert [o.get("most_severe") for o in out] == [
+        "synonymous_variant", "stop_gained", "missense_variant"]
+    assert out[0]["gene"] == "GENA" and out[2]["gene"] == "GENZ"
+    # Only the variant the batch omitted (pos 200) used the single-variant fallback.
+    assert fallback_calls == [200]
+
+
 def test_clinvar_selects_only_exact_allele(monkeypatch):
     wrong = {
         "variation_set": [
@@ -1001,6 +1038,37 @@ def test_map_concurrent_preserves_order_and_propagates_errors():
         rx._map_concurrent([1, 2, 3, 4, 5], boom, 4)
 
 
+def test_map_concurrent_reports_completed_items():
+    # on_progress must receive (done, item) so callers can label progress with the finished item.
+    seen = []
+    out = rx._map_concurrent([10, 20, 30], lambda x: x + 1, 3,
+                             on_progress=lambda done, item: seen.append((done, item)))
+    assert out == [11, 21, 31]
+    assert sorted(done for done, _ in seen) == [1, 2, 3]
+    assert {item for _, item in seen} == {10, 20, 30}
+    # serial fallback (single worker) also passes the item, in order
+    seen.clear()
+    rx._map_concurrent([5, 6], lambda x: x, 1,
+                       on_progress=lambda done, item: seen.append((done, item)))
+    assert seen == [(1, 5), (2, 6)]
+
+
+def test_validate_vcf_head_accepts_valid_and_rejects_malformed(tmp_path):
+    good = write_vcf(tmp_path / "good.vcf", ["1\t200\t.\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/1\n"])
+    rx.validate_vcf_head(good, sample="REQUESTED")            # header + a record -> no exception
+    bad = tmp_path / "bad.vcf"; bad.write_text("not a VCF\n", encoding="utf-8")
+    with pytest.raises(rx.VCFParseError):                     # not a VCF (no #CHROM header)
+        rx.validate_vcf_head(bad)
+    with pytest.raises(rx.VCFParseError):                     # header only, no data records
+        rx.validate_vcf_head(write_vcf(tmp_path / "empty.vcf", []), sample="REQUESTED")
+    with pytest.raises(rx.VCFParseError):                     # requested sample missing (multi-sample)
+        rx.validate_vcf_head(good, sample="NOPE")
+    # It must be cheap: reading stops at the first data record, not the whole file.
+    big = write_vcf(tmp_path / "big.vcf",
+                    ["1\t%d\t.\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/1\n" % (1000 + i) for i in range(5)])
+    rx.validate_vcf_head(big, sample="REQUESTED")
+
+
 def test_prefilter_skips_deep_layers_for_common_variants_and_ranks_candidates(tmp_path, monkeypatch):
     path = write_vcf(
         tmp_path / "mix.vcf",
@@ -1025,7 +1093,7 @@ def test_prefilter_skips_deep_layers_for_common_variants_and_ranks_candidates(tm
     deep_calls = {"clinvar": set(), "constraint": set()}
 
     monkeypatch.setattr(rx, "_annotation_workers", lambda: 4)
-    monkeypatch.setattr(rx, "vep", lambda v, assembly: vep_by_pos[v["pos"]])
+    monkeypatch.setattr(rx, "vep_batch", lambda recs, assembly: [vep_by_pos[v["pos"]] for v in recs])
     monkeypatch.setattr(rx, "gnomad_af", lambda v, return_status=False: (af_by_pos[v["pos"]], True))
 
     def fake_constraint(gene, cache):
@@ -1065,6 +1133,54 @@ def test_prefilter_skips_deep_layers_for_common_variants_and_ranks_candidates(tm
     assert not any("unavailable" in w for w in result["warnings"])
 
 
+def test_progress_messages_are_explicit_step_by_step(tmp_path, monkeypatch):
+    # The UI must be able to show exactly which numbered stage the analysis is in, name the real
+    # data source of each stage, and report the specific variant it just finished.
+    path = write_vcf(
+        tmp_path / "mix.vcf",
+        [
+            "1\t100\t.\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\n",  # common (AF 0.20) -> prefiltered Benign
+            "1\t200\t.\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/1\n",  # rare candidate -> deep evidence
+        ],
+    )
+    af_by_pos = {100: 0.20, 200: 1e-5}
+    vep_by_pos = {
+        100: {"most_severe": "intron_variant", "gene": "GENA", "gene_id": "ENSG1",
+              "amino_acids": None, "sift": None, "polyphen": None,
+              "annotation_available": True, "gnomad_af": None},
+        200: {"most_severe": "stop_gained", "gene": "GENB", "gene_id": "ENSG2",
+              "amino_acids": None, "sift": None, "polyphen": None,
+              "annotation_available": True, "gnomad_af": None},
+    }
+    monkeypatch.setattr(rx, "_annotation_workers", lambda: 2)
+    monkeypatch.setattr(rx, "vep_batch", lambda recs, assembly: [vep_by_pos[v["pos"]] for v in recs])
+    monkeypatch.setattr(rx, "gnomad_af", lambda v, return_status=False: (af_by_pos[v["pos"]], True))
+    monkeypatch.setattr(rx, "gnomad_constraint",
+                        lambda gene, cache: {"pli": None, "loeuf": None, "available": True})
+    monkeypatch.setattr(rx, "clinvar",
+                        lambda v, email, assembly: {"significance": None, "stars": 0,
+                                                    "conditions": [], "available": True})
+
+    messages = []
+    rx.run_pipeline(path, sample="REQUESTED", assembly="GRCh38",
+                    progress=lambda done, total, msg: messages.append(msg))
+
+    assert messages, "expected progress messages"
+    # Every pipeline message is a numbered step of the same known total (no trio/agentic -> 6).
+    assert all(m.startswith("Paso ") for m in messages)
+    assert all("/6 \u00b7" in m for m in messages)
+    # Each stage names what it is really doing / which data source it queries.
+    assert any(m.startswith("Paso 1/6") and "VCF" in m for m in messages)      # read VCF
+    assert any(m.startswith("Paso 2/6") for m in messages)                     # HPO profile
+    assert any("Ensembl VEP" in m and "gnomAD" in m for m in messages)         # frequency annotation
+    assert any("Prefiltrado" in m for m in messages)                           # prefilter
+    assert any("ClinVar" in m for m in messages)                               # deep evidence
+    assert any("Priorizaci\u00f3n" in m for m in messages)                     # final ranking
+    # Per-variant granularity: the deep-evidence progress names the candidate and its call.
+    assert any("\u00faltima:" in m for m in messages)
+    assert any("GENB \u2192" in m for m in messages)
+
+
 def test_prefilter_cutoff_is_floored_at_ba1_threshold(monkeypatch):
     # BA1 (classify) and the prefilter must share one threshold, so a sub-BA1 env value is
     # clamped up — otherwise variants in [cutoff, 0.05) would skip the deep layers without
@@ -1086,10 +1202,10 @@ def test_hpo_expansion_is_opt_in_not_automatic(tmp_path, monkeypatch):
         ["1\t200\t.\tC\tT\t.\tPASS\t.\tGT\t0/0\t0/1\n"],
     )
     monkeypatch.setattr(rx, "_annotation_workers", lambda: 1)
-    monkeypatch.setattr(rx, "vep", lambda v, assembly: {
+    monkeypatch.setattr(rx, "vep_batch", lambda recs, assembly: [{
         "most_severe": "missense_variant", "gene": "GENB", "gene_id": "ENSG2",
         "amino_acids": "V/M", "sift": None, "polyphen": None,
-        "annotation_available": True, "gnomad_af": None})
+        "annotation_available": True, "gnomad_af": None} for v in recs])
     monkeypatch.setattr(rx, "gnomad_af", lambda v, return_status=False: (1e-5, True))
     monkeypatch.setattr(rx, "gnomad_constraint",
                         lambda gene, cache: {"pli": None, "loeuf": None, "available": True})
